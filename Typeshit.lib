@@ -46,16 +46,20 @@ local players = game:GetService("Players")
 local http_service = game:GetService("HttpService")
 local gui_service = game:GetService("GuiService")
 local tween_service = game:GetService("TweenService")
+local run_service = game:GetService("RunService")
 local coregui = cloneref(game:GetService("CoreGui"))
 
 --// shortcuts
 local vec2 = Vector2.new
 local dim2 = UDim2.new
 local dim = UDim.new
+local rect = Rect.new
 local rgb = Color3.fromRGB
 local hex = Color3.fromHex
 local hsv = Color3.fromHSV
+local new = Instance.new
 
+--// shortcuts (std lib)
 local floor = math.floor
 local clamp = math.clamp
 local insert = table.insert
@@ -241,7 +245,15 @@ local function load_font()
 		return font
 	end
 
-	return Font.fromEnum(Enum.Font.Code)
+	local ok_fallback, fallback = pcall(function()
+		return Font.fromEnum(Enum.Font.Code)
+	end)
+
+	if ok_fallback and fallback then
+		return fallback
+	end
+
+	return Enum.Font.Code
 end
 
 library.font = load_font()
@@ -414,8 +426,6 @@ function library:hover_tooltip(instance, text)
 		library:remove_tooltip()
 	end)
 end
-
-local run_service = game:GetService("RunService")
 
 --// root gui
 library.gui = library:create("ScreenGui", {
@@ -822,7 +832,7 @@ function library:window(properties)
 			if dragging then
 				local delta = input.Position - drag_start
 				local viewport_size = camera.ViewportSize
-				local x = clamp(start_position.X.Offset + delta.X, -main.Size.X.Offset + 130, viewport_size.X - 70)
+				local x = clamp(start_position.X.Offset + delta.X, -holder.Size.X.Offset + 130, viewport_size.X - 70)
 				local y = clamp(start_position.Y.Offset + delta.Y, 0, viewport_size.Y - 42)
 
 				holder.Position = dim2(0, x, 0, y)
@@ -2788,6 +2798,8 @@ function library:get_configs()
 
 	return configs
 end
+
+getgenv().typeshit = library
 
 return library
 
