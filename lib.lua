@@ -1,2807 +1,1354 @@
---[[
-	typeshit.cc - cozy ui library
-	layout inspired by "rune" | colors, buttons & sliders inspired by toilet-ui
-
-	api:
-		local library = loadstring(<this file>)()
-		library.flags / library.config_flags
-
-		library:window{ name, size, menu_key }            -> window
-		window:tab{ name }                                -> tab
-		tab:section{ name, side = "left"|"right", fill }  -> section
-
-		section:toggle{ name, flag, default, tooltip, callback }    -> toggle (chain :colorpicker / :keybind)
-		section:slider{ name, flag, default, min, max, step, suffix, decimals, custom, tooltip, callback }
-		section:dropdown{ name, flag, items, multi, default, tooltip, callback }
-		section:button{ name, size = 1|0.5|0.33, tooltip, callback }
-		section:textbox{ name, flag, placeholder, default, tooltip, callback }
-		section:colorpicker{ name?, flag, color, transparency, tooltip, callback }
-		section:keybind{ name?, flag, default, mode = "toggle"|"hold"|"always", tooltip, callback }
-		section:listbox{ name?, flag, items, tooltip, callback }
-		section:label{ name, color? }
-		section:divider()
-
-		library:notification{ text, time }
-		library:save_config(name) / library:load_config(name) / library:get_configs()
-		library:theme(name, color)          -- live theme editing
-		library:toggle_menu()               -- menu keybind (default RightShift) or call directly
-		library:unload()
-]]
-
-if getgenv and getgenv().typeshit and getgenv().typeshit.unload then
-	getgenv().typeshit:unload()
-end
-
--- executor backports
-cloneref = cloneref or function(object)
-	return object
-end
-gethui = gethui or function()
-	return game:GetService("CoreGui")
-end
-
---// services
-local uis = game:GetService("UserInputService")
-local players = game:GetService("Players")
-local http_service = game:GetService("HttpService")
-local gui_service = game:GetService("GuiService")
-local tween_service = game:GetService("TweenService")
-local coregui = cloneref(game:GetService("CoreGui"))
-
---// shortcuts
-local vec2 = Vector2.new
-local dim2 = UDim2.new
-local dim = UDim.new
-local rgb = Color3.fromRGB
-local hex = Color3.fromHex
-local hsv = Color3.fromHSV
-
-local floor = math.floor
-local clamp = math.clamp
-local insert = table.insert
-local remove = table.remove
-local find = table.find
-
-local camera = workspace.CurrentCamera
-local lp = players.LocalPlayer
-local mouse = lp:GetMouse()
-local gui_inset = gui_service:GetGuiInset().Y
-
---// library
-local library = {
-	flags = {},
-	config_flags = {},
-	connections = {},
-	instances = {},
-	notifications = {},
-
-	current_tab = nil,
-	current_element_open = nil,
-	keybind_listening = nil,
-
-	open = true,
-	gui = nil,
-
-	directory = "typeshit",
-	folders = { "/configs", "/fonts" },
-	font = nil,
-	text_size = 13,
-}
-
--- theme registry (lets library:theme() recolor the whole ui live)
-local theme_registry = {}
-
-local function register_theme(instance, theme, property)
-	theme_registry[theme] = theme_registry[theme] or {}
-	insert(theme_registry[theme], { instance = instance, property = property })
-end
-
--- toilet-core palette
-library.theme = {
-	["background"] = rgb(23, 23, 28), -- window body
-	["outline"] = rgb(10, 10, 13), -- outer border / darkest
-	["inline"] = rgb(52, 52, 62), -- strokes
-	["contrast"] = rgb(29, 29, 35), -- panels / sidebar
-	["element"] = rgb(44, 44, 53), -- buttons, dropdown boxes
-	["element_hover"] = rgb(56, 56, 66),
-	["text"] = rgb(232, 232, 238), -- bright text
-	["muted_text"] = rgb(139, 139, 151), -- labels, values, unselected tabs
-	["accent"] = rgb(86, 86, 255), -- indigo blue
-	["slider_fill"] = rgb(197, 198, 209), -- light gray slider fill
-}
-
-function library:update_theme(theme, color)
-	if not library.theme[theme] then
-		return
-	end
-
-	library.theme[theme] = color
-
-	for _, object in next, theme_registry[theme] or {} do
-		if object.instance[object.property] ~= nil then
-			object.instance[object.property] = color
-		end
-	end
-end
-
-function library:theme(name, color)
-	library:update_theme(name, color)
-end
-
---// key name map
-local keys = {
-	[Enum.KeyCode.LeftShift] = "LSHIFT",
-	[Enum.KeyCode.RightShift] = "RSHIFT",
-	[Enum.KeyCode.LeftControl] = "LCTRL",
-	[Enum.KeyCode.RightControl] = "RCTRL",
-	[Enum.KeyCode.LeftAlt] = "LALT",
-	[Enum.KeyCode.RightAlt] = "RALT",
-	[Enum.KeyCode.Insert] = "INS",
-	[Enum.KeyCode.Backspace] = "BACK",
-	[Enum.KeyCode.Return] = "ENTER",
-	[Enum.KeyCode.CapsLock] = "CAPS",
-	[Enum.KeyCode.Tab] = "TAB",
-	[Enum.KeyCode.Escape] = "ESC",
-	[Enum.KeyCode.Space] = "SPACE",
-	[Enum.KeyCode.One] = "1",
-	[Enum.KeyCode.Two] = "2",
-	[Enum.KeyCode.Three] = "3",
-	[Enum.KeyCode.Four] = "4",
-	[Enum.KeyCode.Five] = "5",
-	[Enum.KeyCode.Six] = "6",
-	[Enum.KeyCode.Seven] = "7",
-	[Enum.KeyCode.Eight] = "8",
-	[Enum.KeyCode.Nine] = "9",
-	[Enum.KeyCode.Zero] = "0",
-	[Enum.KeyCode.KeypadOne] = "NUM1",
-	[Enum.KeyCode.KeypadTwo] = "NUM2",
-	[Enum.KeyCode.KeypadThree] = "NUM3",
-	[Enum.KeyCode.KeypadFour] = "NUM4",
-	[Enum.KeyCode.KeypadFive] = "NUM5",
-	[Enum.KeyCode.KeypadSix] = "NUM6",
-	[Enum.KeyCode.KeypadSeven] = "NUM7",
-	[Enum.KeyCode.KeypadEight] = "NUM8",
-	[Enum.KeyCode.KeypadNine] = "NUM9",
-	[Enum.KeyCode.KeypadZero] = "NUM0",
-	[Enum.KeyCode.Minus] = "-",
-	[Enum.KeyCode.Equals] = "=",
-	[Enum.KeyCode.LeftBracket] = "[",
-	[Enum.KeyCode.RightBracket] = "]",
-	[Enum.KeyCode.Semicolon] = ";",
-	[Enum.KeyCode.Quote] = "'",
-	[Enum.KeyCode.Comma] = ",",
-	[Enum.KeyCode.Period] = ".",
-	[Enum.KeyCode.Slash] = "/",
-	[Enum.KeyCode.Backquote] = "`",
-	[Enum.KeyCode.Up] = "UP",
-	[Enum.KeyCode.Down] = "DOWN",
-	[Enum.KeyCode.Left] = "LEFT",
-	[Enum.KeyCode.Right] = "RIGHT",
-	[Enum.KeyCode.Delete] = "DEL",
-	[Enum.KeyCode.Home] = "HOME",
-	[Enum.KeyCode.End] = "END",
-	[Enum.KeyCode.PageUp] = "PGUP",
-	[Enum.KeyCode.PageDown] = "PGDN",
-	[Enum.UserInputType.MouseButton1] = "MB1",
-	[Enum.UserInputType.MouseButton2] = "MB2",
-	[Enum.UserInputType.MouseButton3] = "MB3",
-}
-
-for code = 1, 26 do
-	local name = string.char(64 + code)
-	local ok, enum = pcall(function()
-		return Enum.KeyCode[name]
-	end)
-	if ok and enum then
-		keys[enum] = name
-	end
-end
-
-for code = 1, 12 do
-	local ok, enum = pcall(function()
-		return Enum.KeyCode["F" .. code]
-	end)
-	if ok and enum then
-		keys[enum] = "F" .. code
-	end
-end
-
-library.keys = keys
-
---// font (pixel font like the reference ui, falls back to a mono font)
-local function load_font()
-	local ok, font = pcall(function()
-		local font_name = "SmallestPixel7"
-		local font_path = library.directory .. "/fonts/main.ttf"
-		local encoded_path = library.directory .. "/fonts/main_encoded.ttf"
-
-		if writefile and isfile and not isfile(font_path) then
-			writefile(font_path, game:HttpGet("https://github.com/i77lhm/storage/raw/refs/heads/main/fonts/fs-tahoma-8px.ttf"))
-		end
-
-		if writefile and isfile and not isfile(encoded_path) then
-			local faces = {
-				name = "SmallestPixel7",
-				faces = {
-					{
-						name = "Regular",
-						weight = 400,
-						style = "normal",
-						assetId = getcustomasset(font_path),
-					},
-				},
-			}
-			writefile(encoded_path, http_service:JSONEncode(faces))
-		end
-
-		return Font.new(getcustomasset(encoded_path), Enum.FontWeight.Regular)
-	end)
-
-	if ok and font then
-		return font
-	end
-
-	return Font.fromEnum(Enum.Font.Code)
-end
-
-library.font = load_font()
-
---// helpers
-function library:create(class, properties)
-	local instance = new(class)
-
-	for property, value in next, properties or {} do
-		if property ~= "Parent" then
-			instance[property] = value
-		end
-	end
-
-	instance.Parent = properties and properties.Parent or nil
-
-	if instance:IsA("Instance") then
-		insert(library.instances, instance)
-	end
-
-	return instance
-end
-
-function library:corner(parent, radius)
-	return library:create("UICorner", {
-		Parent = parent,
-		CornerRadius = dim(0, radius or 4),
-	})
-end
-
-function library:stroke(parent, color, thickness, transparency)
-	local stroke = library:create("UIStroke", {
-		Parent = parent,
-		Color = color or library.theme.outline,
-		Thickness = thickness or 1,
-		ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
-		LineJoinMode = Enum.LineJoinMode.Round,
-		Transparency = transparency or 0,
-	})
-
-	if color then
-		for theme_name, theme_color in next, library.theme do
-			if theme_color == color then
-				register_theme(stroke, theme_name, "Color")
-				break
-			end
-		end
-	end
-
-	return stroke
-end
-
-function library:padding(parent, left, right, top, bottom)
-	return library:create("UIPadding", {
-		Parent = parent,
-		PaddingLeft = dim(0, left or 0),
-		PaddingRight = dim(0, right or 0),
-		PaddingTop = dim(0, top or 0),
-		PaddingBottom = dim(0, bottom or 0),
-	})
-end
-
-function library:list(parent, padding, direction, horizontal_align)
-	return library:create("UIListLayout", {
-		Parent = parent,
-		FillDirection = direction or Enum.FillDirection.Vertical,
-		HorizontalAlignment = horizontal_align or Enum.HorizontalAlignment.Left,
-		Padding = dim(0, padding or 4),
-		SortOrder = Enum.SortOrder.LayoutOrder,
-	})
-end
-
-function library:connection(signal, callback)
-	local connection = signal:Connect(callback)
-	insert(library.connections, connection)
-	return connection
-end
-
-function library:round(number, float)
-	local multiplier = 1 / (float or 1)
-	return floor(number * multiplier + 0.5) / multiplier
-end
-
-function library:tween(instance, time, properties)
-	local tween = tween_service:Create(
-		instance,
-		TweenInfo.new(time or 0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
-		properties or {}
-	)
-	tween:Play()
-	return tween
-end
-
-function library:tooltip(text)
-	if not text or text == "" then
-		return
-	end
-
-	local holder = library:create("Frame", {
-		Parent = library.gui,
-		Name = "tooltip",
-		ZIndex = 200,
-		Visible = false,
-		BackgroundColor3 = library.theme.element,
-		AutomaticSize = Enum.AutomaticSize.XY,
-		BorderSizePixel = 0,
-		BackgroundTransparency = 0,
-	})
-
-	library:corner(holder, 4)
-	library:stroke(holder, library.theme.inline, 1)
-
-	local label = library:create("TextLabel", {
-		Parent = holder,
-		Font = library.font,
-		Text = text,
-		TextSize = library.text_size,
-		TextColor3 = library.theme.text,
-		TextWrapped = true,
-		BackgroundTransparency = 1,
-		TextXAlignment = Enum.TextXAlignment.Left,
-		Size = dim2(0, 0, 0, 0),
-		AutomaticSize = Enum.AutomaticSize.XY,
-		ZIndex = 200,
-	})
-
-	library:padding(holder, 6, 6, 4, 4)
-
-	local maximum_width = 260
-	task.defer(function()
-		if label.AbsoluteSize.X > maximum_width then
-			label.Size = dim2(0, maximum_width, 0, 0)
-		end
-	end)
-
-	local move = library:connection(run_service.RenderStepped, function()
-		local position = vec2(mouse.X, mouse.Y)
-		holder.Position = dim2(0, position.X + 14, 0, position.Y + 14)
-
-		local viewport = camera.ViewportSize
-		if position.X + 14 + holder.AbsoluteSize.X > viewport.X then
-			holder.Position = dim2(0, position.X - holder.AbsoluteSize.X - 10, 0, position.Y + 14)
-		end
-	end)
-
-	library.active_tooltip = { holder = holder, move = move }
-end
-
-function library:remove_tooltip()
-	local tooltip = library.active_tooltip
-
-	if not tooltip then
-		return
-	end
-
-	library.active_tooltip = nil
-	tooltip.move:Disconnect()
-	tooltip.holder:Destroy()
-end
-
-function library:hover_tooltip(instance, text)
-	instance.MouseEnter:Connect(function()
-		if library.keybind_listening then
-			return
-		end
-		library:tooltip(text)
-	end)
-
-	instance.MouseLeave:Connect(function()
-		library:remove_tooltip()
-	end)
-end
-
-local run_service = game:GetService("RunService")
-
---// root gui
-library.gui = library:create("ScreenGui", {
-	Parent = gethui(),
-	Name = "typeshit.cc",
-	DisplayOrder = 999,
-	ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
-	ResetOnSpawn = false,
-	IgnoreGuiInset = true,
-})
-
--- mouse position helper (AbsolutePosition space)
-local function get_mouse()
-	return vec2(mouse.X, mouse.Y)
-end
-
-local function is_hovering(frame)
-	local mouse_position = get_mouse()
-	local position, size = frame.AbsolutePosition, frame.AbsoluteSize
-
-	return mouse_position.X >= position.X
-		and mouse_position.X <= position.X + size.X
-		and mouse_position.Y >= position.Y
-		and mouse_position.Y <= position.Y + size.Y
-end
-
-library.is_hovering = is_hovering
-
--- click-away: closes the open dropdown / colorpicker when clicking elsewhere
-library:connection(uis.InputBegan, function(input, game_processed)
-	if game_processed then
-		return
-	end
-
-	if input.UserInputType == Enum.UserInputType.MouseButton1 then
-		local open_element = library.current_element_open
-
-		if open_element and open_element.window then
-			local inside_window = is_hovering(open_element.window)
-			local inside_trigger = open_element.trigger and is_hovering(open_element.trigger)
-
-			if not inside_window and not inside_trigger then
-				open_element.set_visible(false)
-				open_element.open = false
-				library.current_element_open = nil
-			end
-		end
-	end
+--[[═════════════════════════════════════════════════════════════════════════
+    TypeShit ESP v1.2 • typeshit.cc private
+    ──────────────────────────────────────────────────────────────────────────
+    A self-contained, high-performance ESP library built on the executor
+    Drawing API (Line / Square / Text / Circle), with a graceful Instance-based
+    fallback renderer for environments without Drawing support.
+
+    FEATURES
+      • Pixel-perfect rendering — every coordinate rounded to whole pixels
+      • Box ESP — "square" | "chamfer" (rounded corners) | "corner" brackets
+      • Health bar — smooth animated vertical or horizontal gradient bar
+      • Chams — occluded Highlights, see players through walls
+      • Auto-scale boxes — sized from the real character bounds (R6/R15)
+      • Tool text — equipped weapon name under the box
+      • Name + Distance — outlined text, username style ("cassenderekmason")
+      • Skeleton ESP — R6 + R15 stick figures drawn with Line objects
+      • Ping status dot — live latency dot beside the name
+      • Tracers (optional) — bottom / center / top screen origin
+      • Team check + team colors, wall check (dim or hide occluded players)
+      • Object pooling + change-detection caching (near-zero GC churn)
+      • 500-stud default range, BindToRenderStep at camera priority
+
+    USAGE
+      1. Copy this whole file into your executor and press Execute.
+         The ESP starts immediately and tracks every player automatically.
+      2. Runtime control through the EspLib global:
+             EspLib.Toggle()              EspLib.Toggle(true / false)
+             EspLib.Unload()              -- removes everything, full cleanup
+             EspLib.Refresh()             -- re-applies the config to live ESP
+             EspLib.CreateESP(player)     EspLib.RemoveESP(player)
+             EspLib.UpdateESP(dt)         -- manual single-frame update
+             EspLib.Config.Name.Size = 16 -- every option is live-editable
+      3. Re-executing the script cleanly replaces the previous instance.
+
+    COMPATIBILITY
+      • Synapse X / Z, Script-Ware, Krnl, Fluxus, Oxygen U, Wave, Delta, ...
+      • If your executor treats Drawing.Transparency like Roblox instances
+        (0 = opaque instead of 1 = opaque) and everything looks invisible,
+        set  EspLib.Config.Compat.InvertTransparency = true  and Refresh().
+════════════════════════════════════════════════════════════════════════════]]
+
+-- Guard against double execution: cleanly remove a previous instance first.
+local GLOBAL = _G
+pcall(function()
+    local g = getgenv and getgenv()
+    if type(g) == "table" then GLOBAL = g end
 end)
 
---// menu keybind
-library.menu_key = Enum.KeyCode.RightShift
+do
+    local previous = GLOBAL.EspLib
+    if type(previous) == "table" and type(previous.Unload) == "function" then
+        pcall(previous.Unload)
+    end
+end
 
-library:connection(uis.InputBegan, function(input, game_processed)
-	if game_processed then
-		return
-	end
+--══════════════════════════════════════════════════════════════════════════
+-- 1. CONFIGURATION — everything you may want to tweak lives here
+--══════════════════════════════════════════════════════════════════════════
 
-	if input.KeyCode == library.menu_key then
-		if not library.keybind_listening then
-			library:toggle_menu()
-		end
-	end
+local Config = {
+    Enabled     = true,   -- master switch (also EspLib.Toggle())
+    MaxDistance = 500,    -- studs; players further away are never drawn
+    ToggleKey   = nil,    -- e.g. Enum.KeyCode.RightControl for a hotkey
+
+    TeamCheck    = false, -- true: teammates are never drawn
+    TeamColors   = true,  -- true: teammates use Colors.Friendly
+    UseTeamColor = false, -- true: use each player's Roblox TeamColor instead
+    WallCheck    = true,  -- true: raycast toward players; occluded ones are
+    VisibleOnly  = false, --   hidden when true, dimmed when false (Colors.Dim)
+
+    Font = 3,             -- 3 = Monospace: Monocraft-style pixel font
+                          -- (0 = UI   1 = System   2 = Plex)
+
+    Box = {
+        Enabled        = true,
+        Style          = "square",  -- "square" | "chamfer" (rounded) | "corner"
+        Corner         = 6,         -- corner cut size in pixels for "chamfer"
+        Outline        = true,      -- black contrast outline behind the border
+        OutlineOpacity = 0.85,
+        Opacity        = 1,         -- border opacity 0..1
+        Fill           = true,      -- semi-transparent fill inside the box
+        FillOpacity    = 0.5,       -- fill opacity 0..1 (0.5 = 50% see-through)
+        AutoScale      = true,      -- size boxes from the real character bounds
+        MaxSizeStuds   = 25,        -- AutoScale safety clamp (giant/ragdolled rigs)
+        WidthRatio     = "auto",    -- legacy width (used when AutoScale = false)
+        HeightScale    = 3,         -- legacy height (used when AutoScale = false)
+    },
+
+    HealthBar = {
+        Enabled     = true,
+        Side        = "Left",  -- "Left" (vertical) | "Bottom" (horizontal)
+        Padding     = 3,       -- gap between the bar and the box in pixels
+        Thickness   = 4,       -- total bar thickness in pixels (incl. 1px frame)
+        Smooth      = true,    -- animate health changes with a lerp
+        SmoothSpeed = 12,      -- lerp speed (higher = snappier)
+        ShowNumber     = true,      -- floating HP number
+        NumberPosition = "Left",    -- "Left" (beside the bar) | "TopLeft" | "Right"
+        NumberSize     = 11,
+    },
+
+    Name = {
+        Enabled        = true,
+        Size           = 14,
+        UseDisplayName = false, -- false = raw username, like "cassenderekmason"
+    },
+
+    Distance = {
+        Enabled  = true,
+        Size     = 12,
+        Position = "TopRight", -- "TopRight" (image style) | "Top" (under name)
+    },
+
+    Skeleton = {
+        Enabled   = true,
+        Thickness = 1,
+        Opacity   = 0.9,
+    },
+
+    PingDot = {
+        Enabled = false,  -- latency dot beside the name (needs Name.Enabled)
+        Radius  = 2,
+        GoodMs  = 80,     -- green at or below
+        OkayMs  = 160,    -- yellow at or below, red above
+    },
+
+    Tracers = {
+        Enabled   = false,
+        Origin    = "Bottom", -- "Bottom" | "Center" | "Top"
+        Thickness = 1,
+        Opacity   = 0.9,
+    },
+
+    Chams = {
+        Enabled      = true,
+        Color        = Color3.fromRGB(255, 70, 70), -- fill seen through walls
+        Transparency = 0,    -- chams fill transparency (0..1)
+    },
+
+    ToolText = {
+        Enabled = true,
+        Size    = 12,        -- equipped weapon name under the box
+    },
+
+    Colors = {
+        Enemy    = Color3.fromRGB(255, 90, 90),    -- salmon red (image style)
+        Friendly = Color3.fromRGB(122, 255, 82),   -- lime green
+        Name     = Color3.fromRGB(255, 255, 255),  -- soft white
+        Distance = Color3.fromRGB(190, 190, 190),  -- light gray
+        Outline  = Color3.fromRGB(0, 0, 0),        -- text / bar backdrop
+        Fill     = nil,                            -- nil = tint with player color
+        Skeleton = nil,                            -- nil = match the border color
+        Dim      = 0.45,                           -- occluded color multiplier
+        PingGood = Color3.fromRGB(85, 255, 127),
+        PingOkay = Color3.fromRGB(255, 196, 0),
+        PingBad  = Color3.fromRGB(255, 72, 72),
+    },
+
+    Compat = {
+        -- Drawing.Transparency conventions differ between executors: most use
+        -- 1 = opaque. If visuals look inverted on yours, flip this to true.
+        InvertTransparency = false,
+    },
+}
+
+--══════════════════════════════════════════════════════════════════════════
+-- 2. SERVICES, SHIMS & STATE
+--══════════════════════════════════════════════════════════════════════════
+
+local Players    = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local Workspace  = game:GetService("Workspace")
+
+local LocalPlayer = Players.LocalPlayer
+if not LocalPlayer then
+    -- extremely-early execution safety net
+    pcall(function()
+        Players:GetPropertyChangedSignal("LocalPlayer"):Wait()
+    end)
+    LocalPlayer = Players.LocalPlayer
+end
+
+local Camera = Workspace.CurrentCamera
+
+-- RaycastFilterType was renamed Blacklist -> Exclude across client versions.
+local RAY_FILTER
+if pcall(function() return Enum.RaycastFilterType.Exclude end) then
+    RAY_FILTER = Enum.RaycastFilterType.Exclude
+else
+    RAY_FILTER = Enum.RaycastFilterType.Blacklist
+end
+
+-- Internally the library works with OPACITY (1 = solid, 0 = invisible) and
+-- converts to whichever Transparency convention the executor expects.
+local function alpha(opacity)
+    if Config.Compat.InvertTransparency then return 1 - opacity end
+    return opacity
+end
+
+-- Tracked state
+local EspLib          -- forward declaration of the public API table
+local objects     = {} -- player -> ESP bundle
+local pool        = {} -- released bundles, ready for reuse
+local connections = {} -- global event connections
+local running     = true
+
+
+--══════════════════════════════════════════════════════════════════════════
+-- 3. DRAWING ADAPTER
+--   Uses the native executor Drawing API when present; otherwise builds a
+--   faithful substitute from Instances (Frame / TextLabel / UICorner /
+--   UIStroke) parented to gethui() / CoreGui / PlayerGui.
+--══════════════════════════════════════════════════════════════════════════
+
+local NewDrawing            -- function(class) -> drawing object
+local USING_NATIVE = false  -- true when the real Drawing API is available
+local FallbackGui           -- ScreenGui used by the fallback renderer
+
+do
+    local dtype = type(Drawing)
+    if dtype == "table" and type(Drawing.new) == "function" then
+        NewDrawing = Drawing.new
+        USING_NATIVE = true
+    elseif dtype == "function" then
+        NewDrawing = Drawing
+        USING_NATIVE = true
+    else
+        --------------------------------------------------------------------
+        -- Instance-based fallback renderer
+        --------------------------------------------------------------------
+        local FONT_MAP = {
+            [0] = Enum.Font.SourceSans, -- "UI"
+            [1] = Enum.Font.Arial,      -- "System"
+            [2] = Enum.Font.Gotham,     -- "Plex"
+            [3] = Enum.Font.Code,       -- "Monospace"
+        }
+        local state = setmetatable({}, { __mode = "k" }) -- instance -> side data
+
+        FallbackGui = Instance.new("ScreenGui")
+        FallbackGui.Name = "EspLib_Fallback"
+        FallbackGui.ResetOnSpawn = false
+        FallbackGui.IgnoreGuiInset = true -- viewport coords == screen coords
+        FallbackGui.DisplayOrder = 9999
+        FallbackGui.ZIndexBehavior = Enum.ZIndexBehavior.Global
+
+        do -- parent as high as the environment allows
+            local ok = pcall(function()
+                FallbackGui.Parent = (type(gethui) == "function") and gethui()
+                    or game:GetService("CoreGui")
+            end)
+            if not ok or not FallbackGui.Parent then
+                pcall(function()
+                    FallbackGui.Parent = LocalPlayer:FindFirstChild("PlayerGui")
+                end)
+            end
+        end
+
+        -- A Line becomes a rotated frame between From and To.
+        local function lineGeometry(inst)
+            local s = state[inst]
+            local f, t = s.from, s.to
+            local dx, dy = t.X - f.X, t.Y - f.Y
+            local len = math.sqrt(dx * dx + dy * dy)
+            inst.AnchorPoint = Vector2.new(0.5, 0.5)
+            inst.Position = UDim2.fromOffset((f.X + t.X) * 0.5, (f.Y + t.Y) * 0.5)
+            inst.Size = UDim2.fromOffset(math.max(len, 0.01), s.thickness or 1)
+            inst.Rotation = math.deg(math.atan2(dy, dx))
+        end
+
+        -- Squares render as fill (Filled=true) or as a UIStroke ring.
+        local function refreshSquare(inst)
+            local s = state[inst]
+            if s.filled then
+                inst.BackgroundTransparency = 1 - s.transparency
+                inst.BackgroundColor3 = s.color
+                if s.stroke then s.stroke.Enabled = false end
+            else
+                inst.BackgroundTransparency = 1
+                if s.stroke then
+                    s.stroke.Enabled = true
+                    s.stroke.Color = s.color
+                    s.stroke.Transparency = 1 - s.transparency
+                    s.stroke.Thickness = s.thickness or 1
+                end
+            end
+        end
+
+        -- Circles are square frames with a UICorner; Position is the CENTER,
+        -- matching the native Drawing.Circle convention.
+        local function refreshCircle(inst)
+            local s = state[inst]
+            local r = s.radius or 4
+            inst.AnchorPoint = Vector2.new(0.5, 0.5)
+            inst.Position = UDim2.fromOffset(s.x or 0, s.y or 0)
+            inst.Size = UDim2.fromOffset(r * 2, r * 2)
+            inst.BackgroundColor3 = s.color
+            if s.filled then
+                inst.BackgroundTransparency = 1 - s.transparency
+                if s.stroke then s.stroke.Enabled = false end
+            else
+                inst.BackgroundTransparency = 1
+                if s.stroke then
+                    s.stroke.Enabled = true
+                    s.stroke.Color = s.color
+                    s.stroke.Transparency = 1 - s.transparency
+                    s.stroke.Thickness = s.thickness or 1
+                end
+            end
+        end
+
+        local function applyText(inst, k, v)
+            if k == "Position" then
+                inst.Position = UDim2.fromOffset(v.X, v.Y)
+            elseif k == "Text" then
+                inst.Text = v
+            elseif k == "TextSize" then
+                inst.TextSize = v
+                inst.Size = UDim2.fromOffset(800, v + 6)
+            elseif k == "Color" then
+                inst.TextColor3 = v
+            elseif k == "Transparency" then
+                inst.TextTransparency = 1 - v
+            elseif k == "Center" then
+                inst.AnchorPoint = v and Vector2.new(0.5, 0) or Vector2.new(0, 0)
+                inst.TextXAlignment = v and Enum.TextXAlignment.Center
+                    or Enum.TextXAlignment.Left
+            elseif k == "Outline" then
+                inst.TextStrokeTransparency = v and 0 or 1
+            elseif k == "OutlineColor" then
+                inst.TextStrokeColor3 = v
+            elseif k == "Font" then
+                inst.Font = FONT_MAP[v] or FONT_MAP[0]
+            end
+        end
+
+
+        local APPLIERS = {
+            Square = function(inst, k, v)
+                local s = state[inst]
+                if k == "Filled" then s.filled = v
+                elseif k == "Thickness" then s.thickness = v
+                elseif k == "Position" then inst.Position = UDim2.fromOffset(v.X, v.Y)
+                elseif k == "Size" then inst.Size = UDim2.fromOffset(v.X, v.Y)
+                elseif k == "Color" then s.color = v
+                elseif k == "Transparency" then s.transparency = v
+                end
+                refreshSquare(inst)
+            end,
+            Line = function(inst, k, v)
+                local s = state[inst]
+                if k == "From" then s.from = v
+                elseif k == "To" then s.to = v
+                elseif k == "Thickness" then s.thickness = v
+                elseif k == "Color" then inst.BackgroundColor3 = v
+                elseif k == "Transparency" then inst.BackgroundTransparency = 1 - v
+                end
+                if k == "From" or k == "To" or k == "Thickness" then
+                    lineGeometry(inst)
+                end
+            end,
+            Text = applyText,
+            Circle = function(inst, k, v)
+                local s = state[inst]
+                if k == "Position" then s.x, s.y = v.X, v.Y
+                elseif k == "Radius" then s.radius = v
+                elseif k == "Filled" then s.filled = v
+                elseif k == "Thickness" then s.thickness = v
+                elseif k == "Color" then s.color = v
+                elseif k == "Transparency" then s.transparency = v
+                end
+                refreshCircle(inst)
+            end,
+        }
+
+        NewDrawing = function(class)
+            local instClass = (class == "Text") and "TextLabel" or "Frame"
+            local inst = Instance.new(instClass)
+            inst.BorderSizePixel = 0
+            inst.BackgroundColor3 = Color3.new(1, 1, 1)
+            inst.BackgroundTransparency = 1
+            inst.Visible = false
+            inst.Parent = FallbackGui
+
+            local s = {
+                transparency = 1, color = Color3.new(1, 1, 1),
+                from = Vector2.new(0, 0), to = Vector2.new(0, 0),
+                radius = 4, thickness = 1, filled = false, x = 0, y = 0,
+            }
+            if instClass == "Frame" then
+                local stroke = Instance.new("UIStroke")
+                stroke.Enabled = false
+                stroke.Parent = inst
+                s.stroke = stroke
+                if class == "Circle" then
+                    local corner = Instance.new("UICorner")
+                    corner.CornerRadius = UDim.new(1, 0)
+                    corner.Parent = inst
+                end
+            end
+            state[inst] = s
+
+            -- The proxy mimics a Drawing object; property writes are applied
+            -- to the backing instance immediately.
+            local props = {}
+            return setmetatable({}, {
+                __index = function(_, k)
+                    if k == "Remove" or k == "Destroy" then
+                        return function()
+                            props.Visible = false
+                            state[inst] = nil
+                            pcall(function() inst:Destroy() end)
+                        end
+                    elseif k == "TextBounds" then
+                        return inst.TextBounds
+                    end
+                    return props[k]
+                end,
+                __newindex = function(_, k, v)
+                    props[k] = v
+                    if k == "Visible" then
+                        inst.Visible = v and true or false
+                    elseif k == "ZIndex" then
+                        inst.ZIndex = v
+                    else
+                        local apply = APPLIERS[class]
+                        if apply then apply(inst, k, v) end
+                    end
+                end,
+            })
+        end
+    end
+end
+
+
+--══════════════════════════════════════════════════════════════════════════
+-- 4. UTILITIES
+--══════════════════════════════════════════════════════════════════════════
+
+-- Lua 5.1-safe helpers (no dependency on Luau-only globals like math.round).
+local function round(n) return math.floor(n + 0.5) end
+
+local function clamp(v, lo, hi)
+    if v < lo then return lo end
+    if v > hi then return hi end
+    return v
+end
+
+-- Red -> green health gradient through HSV hue space (0 = red, 0.33 = green).
+local function healthColor(ratio)
+    return Color3.fromHSV(clamp(ratio, 0, 1) * 0.33, 0.85, 1)
+end
+
+-- Darken a color for occluded ("through wall") players.
+local function dimColor(c, k)
+    return Color3.new(c.R * k, c.G * k, c.B * k)
+end
+
+-- Change-detection helpers. Property writes on Drawing objects cross the
+-- Lua/C boundary every call, so the library only writes a property when its
+-- value actually changed.  This is the single biggest performance win.
+local function setVisible(o, want)
+    if o.Visible ~= want then o.Visible = want end
+end
+
+local COLOR_CACHE = setmetatable({}, { __mode = "k" })
+local function setColor(o, col)
+    if COLOR_CACHE[o] ~= col then
+        COLOR_CACHE[o] = col
+        o.Color = col
+    end
+end
+
+local function setLine(o, cache, i, x1, y1, x2, y2)
+    local c = cache[i]
+    if not c then c = { -1, -1, -1, -1 } cache[i] = c end
+    if c[1] ~= x1 or c[2] ~= y1 or c[3] ~= x2 or c[4] ~= y2 then
+        c[1], c[2], c[3], c[4] = x1, y1, x2, y2
+        o.From = Vector2.new(x1, y1)
+        o.To   = Vector2.new(x2, y2)
+    end
+end
+
+local function setRect(o, cache, i, x, y, w, h)
+    local c = cache[i]
+    if not c then c = { -1, -1, -1, -1 } cache[i] = c end
+    if c[1] ~= x or c[2] ~= y or c[3] ~= w or c[4] ~= h then
+        c[1], c[2], c[3], c[4] = x, y, w, h
+        o.Position = Vector2.new(x, y)
+        o.Size     = Vector2.new(w, h)
+    end
+end
+
+local function setText(o, cache, text, x, y)
+    if cache[1] ~= x or cache[2] ~= y or cache[3] ~= text then
+        cache[1], cache[2], cache[3] = x, y, text
+        o.Position = Vector2.new(x, y)
+        o.Text     = text
+    end
+end
+
+local function setCircle(o, cache, x, y, r)
+    if cache[1] ~= x or cache[2] ~= y or cache[3] ~= r then
+        cache[1], cache[2], cache[3] = x, y, r
+        o.Position = Vector2.new(x, y)
+        o.Radius   = r
+    end
+end
+
+-- Hides every drawing of a bundle; cheap no-op while already hidden.
+local function hidePlayer(data)
+    if not data.hidden then
+        data.hidden = true
+        local all = data.all
+        for i = 1, #all do
+            local o = all[i]
+            if o.Visible then o.Visible = false end
+        end
+    end
+end
+
+-- ── executor quirk shims ─────────────────────────────────────────────────
+-- Historical Drawing implementations disagree on the text font-size property
+-- name: some expose "TextSize", Synapse-style APIs expose "Size" (and error
+-- on "TextSize").  Probe which one the executor accepts, then stick to it.
+local TEXT_SIZE_PROP = "TextSize"
+
+local function setTextSize(d, size)
+    if TEXT_SIZE_PROP == "Size" then
+        d.Size = size
+        return
+    end
+    local ok = pcall(function() d.TextSize = size end)
+    if not ok then
+        TEXT_SIZE_PROP = "Size" -- executor uses the Synapse convention
+        pcall(function() d.Size = size end)
+    end
+end
+
+-- Rare executors lack Font / OutlineColor on Text drawings; degrade
+-- gracefully instead of erroring (both are purely cosmetic).
+local FONT_OK = true
+local function setTextFont(d, font)
+    if FONT_OK then
+        FONT_OK = pcall(function() d.Font = font end)
+    end
+end
+
+local OUTLINE_COLOR_OK = true
+local function setTextOutline(d, color)
+    if OUTLINE_COLOR_OK then
+        OUTLINE_COLOR_OK = pcall(function() d.OutlineColor = color end)
+    end
+end
+
+
+--══════════════════════════════════════════════════════════════════════════
+-- 5. GEOMETRY & CHARACTER BINDING
+--══════════════════════════════════════════════════════════════════════════
+
+local BONE_COUNT = 14
+
+-- Rig bone maps: chains of { parentPartName, childPartName }.
+local R15_BONES = {
+    { "Head", "UpperTorso" },
+    { "UpperTorso", "LowerTorso" },
+    { "LowerTorso", "LeftUpperLeg" },  { "LeftUpperLeg", "LeftLowerLeg" },
+    { "LeftLowerLeg", "LeftFoot" },
+    { "LowerTorso", "RightUpperLeg" }, { "RightUpperLeg", "RightLowerLeg" },
+    { "RightLowerLeg", "RightFoot" },
+    { "UpperTorso", "LeftUpperArm" },  { "LeftUpperArm", "LeftLowerArm" },
+    { "LeftLowerArm", "LeftHand" },
+    { "UpperTorso", "RightUpperArm" }, { "RightUpperArm", "RightLowerArm" },
+    { "RightLowerArm", "RightHand" },
+}
+local R6_BONES = {
+    { "Head", "Torso" },
+    { "Torso", "Left Arm" },  { "Torso", "Right Arm" },
+    { "Torso", "Left Leg" },  { "Torso", "Right Leg" },
+}
+
+-- Resolves the bone parts of a character once, when it is assigned.
+local function buildBones(char)
+    local map = R6_BONES
+    if char:FindFirstChild("UpperTorso") then map = R15_BONES end
+    local bones = {}
+    for i = 1, #map do
+        local pair = map[i]
+        bones[i] = { char:FindFirstChild(pair[1]), char:FindFirstChild(pair[2]) }
+    end
+    return bones
+end
+
+-- Box width relative to box height. R15 rigs are slimmer than R6.
+local R15_RATIO, R6_RATIO = 0.60, 0.72
+
+local function getBoxWidthRatio(data)
+    local r = Config.Box.WidthRatio
+    if r == "auto" then
+        local hum = data.hum
+        if hum and hum.RigType == Enum.HumanoidRigType.R15 then
+            return R15_RATIO
+        end
+        return R6_RATIO
+    end
+    return r
+end
+
+-- Reusable scratch table for border segments (zero allocations per frame).
+local SEG = {}
+for i = 1, 8 do SEG[i] = {} end
+
+-- Builds the 4 or 8 border segments for the configured box style and returns
+-- how many segments were written into SEG.
+local function buildSegments(bx, by, bw, bh)
+    local style = Config.Box.Style
+    if style == "corner" then
+        local lx = clamp(round(bw * 0.25), 6, math.floor(bw * 0.5) - 1)
+        local ly = clamp(round(bh * 0.25), 6, math.floor(bh * 0.5) - 1)
+        local s = SEG[1]; s[1], s[2], s[3], s[4] = bx,           by,      bx + lx,      by
+        s = SEG[2];       s[1], s[2], s[3], s[4] = bx,           by,      bx,           by + ly
+        s = SEG[3];       s[1], s[2], s[3], s[4] = bx + bw - lx, by,      bx + bw,      by
+        s = SEG[4];       s[1], s[2], s[3], s[4] = bx + bw,      by,      bx + bw,      by + ly
+        s = SEG[5];       s[1], s[2], s[3], s[4] = bx,           by + bh, bx + lx,      by + bh
+        s = SEG[6];       s[1], s[2], s[3], s[4] = bx,           by + bh - ly, bx,      by + bh
+        s = SEG[7];       s[1], s[2], s[3], s[4] = bx + bw - lx, by + bh, bx + bw,      by + bh
+        s = SEG[8];       s[1], s[2], s[3], s[4] = bx + bw,      by + bh - ly, bx + bw, by + bh
+        return 8
+    end
+    local r = 0
+    if style == "chamfer" then
+        r = clamp(Config.Box.Corner or 6, 2, math.floor(math.min(bw, bh) * 0.5) - 1)
+        if bw < r * 2 + 4 or bh < r * 2 + 4 then r = 0 end -- tiny boxes stay square
+    end
+    local s = SEG[1]; s[1], s[2], s[3], s[4] = bx + r,      by,      bx + bw - r, by
+    s = SEG[2];       s[1], s[2], s[3], s[4] = bx + r,      by + bh, bx + bw - r, by + bh
+    s = SEG[3];       s[1], s[2], s[3], s[4] = bx,          by + r,  bx,          by + bh - r
+    s = SEG[4];       s[1], s[2], s[3], s[4] = bx + bw,     by + r,  bx + bw,     by + bh - r
+    if r > 0 then
+        s = SEG[5]; s[1], s[2], s[3], s[4] = bx,          by + r,  bx + r,      by
+        s = SEG[6]; s[1], s[2], s[3], s[4] = bx + bw - r, by,      bx + bw,     by + r
+        s = SEG[7]; s[1], s[2], s[3], s[4] = bx,          by + bh - r, bx + r,  by + bh
+        s = SEG[8]; s[1], s[2], s[3], s[4] = bx + bw - r, by + bh, bx + bw,     by + bh - r
+        return 8
+    end
+    return 4
+end
+
+-- Snug bounding box (center + size) from the character's DIRECT BaseParts.
+-- R6/R15 body parts are direct children, so equipped tools (Tool > Handle)
+-- and accessory handles are naturally excluded. Uses part AABBs, so heavily
+-- rotated limbs can widen the box slightly.
+local function computeBounds(char)
+    local minX, minY, minZ = math.huge, math.huge, math.huge
+    local maxX, maxY, maxZ = -math.huge, -math.huge, -math.huge
+    local found = false
+    for _, p in ipairs(char:GetChildren()) do
+        if p:IsA("BasePart") then
+            found = true
+            local pos, half = p.Position, p.Size * 0.5
+            minX = math.min(minX, pos.X - half.X)
+            maxX = math.max(maxX, pos.X + half.X)
+            minY = math.min(minY, pos.Y - half.Y)
+            maxY = math.max(maxY, pos.Y + half.Y)
+            minZ = math.min(minZ, pos.Z - half.Z)
+            maxZ = math.max(maxZ, pos.Z + half.Z)
+        end
+    end
+    if not found then return nil, nil end
+    local center = Vector3.new((minX + maxX) * 0.5, (minY + maxY) * 0.5, (minZ + maxZ) * 0.5)
+    local size = Vector3.new(maxX - minX, maxY - minY, maxZ - minZ)
+    return center, size
+end
+
+-- Removes a player's occluded-chams Highlight.
+local function destroyChams(data)
+    if data.chams then
+        pcall(function() data.chams:Destroy() end)
+        data.chams = nil
+    end
+end
+
+-- Caches character references, skeleton bones and raycast parameters.
+local function bindCharacter(data, char)
+    data.char  = char
+    data.root  = char:FindFirstChild("HumanoidRootPart")
+    data.hum   = char:FindFirstChildOfClass("Humanoid")
+    data.bones = buildBones(char)
+    data.shownHP = 1
+    if data.hum and data.hum.MaxHealth > 0 then
+        data.shownHP = clamp(data.hum.Health / data.hum.MaxHealth, 0, 1)
+    end
+
+    -- Auto-scale bounds: the box follows the real R6/R15/scaled avatar size.
+    data.boundCenter, data.boundSize = nil, nil
+    if Config.Box.AutoScale then
+        local c, s = computeBounds(char)
+        local maxS = Config.Box.MaxSizeStuds or 25
+        if c and s and s.Y >= 0.5 and s.Y <= maxS
+           and math.max(s.X, s.Z) <= maxS then
+            data.boundCenter, data.boundSize = c, s
+        end
+    end
+
+    -- Occluded chams: DepthMode=Occluded renders the fill ONLY where the
+    -- character is behind geometry, so you see the color through walls and
+    -- the normal character up close. Highlight is local-only and dies with
+    -- the character; note that many simultaneous Highlights cost GPU time.
+    destroyChams(data)
+    if Config.Chams.Enabled then
+        local ok = pcall(function()
+            local h = Instance.new("Highlight")
+            h.Name = "EspLib_Chams"
+            h.FillColor = Config.Chams.Color
+            h.FillTransparency = clamp(Config.Chams.Transparency or 0, 0, 1)
+            h.OutlineColor = Config.Chams.Color
+            h.OutlineTransparency = 1
+            h.DepthMode = Enum.HighlightDepthMode.Occluded
+            h.Parent = char
+            data.chams = h
+        end)
+        if not ok then data.chams = nil end
+    end
+
+    local params = data.rayParams
+    local exclude = {}
+    if LocalPlayer.Character then exclude[#exclude + 1] = LocalPlayer.Character end
+    exclude[#exclude + 1] = char
+    params.FilterDescendantsInstances = exclude
+    params.FilterType = RAY_FILTER
+    params.IgnoreWater = true
+end
+
+-- True when world geometry stands between the camera and the target root.
+local function isOccluded(origin, target, dist, params)
+    local hit = Workspace:Raycast(origin, target - origin, params)
+    if hit and hit.Position then
+        if (hit.Position - origin).Magnitude < dist - 1 then return true end
+    end
+    return false
+end
+
+
+--══════════════════════════════════════════════════════════════════════════
+-- 6. OBJECT POOL & BUNDLE FACTORY
+--   A "bundle" owns every Drawing object one player can ever need.  Bundles
+--   are recycled through a pool, so players joining/leaving never create or
+--   destroy Drawing objects in steady state.
+--══════════════════════════════════════════════════════════════════════════
+
+local function makeBundle()
+    local d, all = {}, {}
+    local function reg(o) all[#all + 1] = o return o end
+
+    -- Box border (8 lines covers every style) + black contrast outline
+    d.box, d.boxO = {}, {}
+    for i = 1, 8 do
+        local l = NewDrawing("Line")
+        l.Thickness, l.Transparency, l.ZIndex, l.Visible = 1, alpha(Config.Box.Opacity or 1), 2, false
+        reg(l); d.box[i] = l
+        local o = NewDrawing("Line")
+        o.Thickness, o.Transparency, o.ZIndex, o.Visible = 3, alpha(Config.Box.OutlineOpacity or 0.85), 1, false
+        reg(o); d.boxO[i] = o
+    end
+
+    -- Fill (brightest glow core) + health bar
+    d.fill = reg(NewDrawing("Square"))
+    d.fill.Filled, d.fill.Thickness, d.fill.ZIndex, d.fill.Visible = true, 1, 2, false
+
+    d.hpBG = reg(NewDrawing("Square"))
+    d.hpBG.Filled, d.hpBG.Transparency, d.hpBG.ZIndex, d.hpBG.Visible = true, alpha(0.7), 2, false
+    d.hpFG = reg(NewDrawing("Square"))
+    d.hpFG.Filled, d.hpFG.Transparency, d.hpFG.ZIndex, d.hpFG.Visible = true, alpha(1), 3, false
+
+    -- Texts (name / distance / hp number / tool)
+    d.name = reg(NewDrawing("Text"))
+    d.name.Center, d.name.Outline, d.name.ZIndex, d.name.Visible = true, true, 5, false
+    d.dist = reg(NewDrawing("Text"))
+    d.dist.Center, d.dist.Outline, d.dist.ZIndex, d.dist.Visible = true, true, 5, false
+    d.hpNum = reg(NewDrawing("Text"))
+    d.hpNum.Center, d.hpNum.Outline, d.hpNum.ZIndex, d.hpNum.Visible = false, true, 5, false
+    d.tool = reg(NewDrawing("Text"))
+    d.tool.Center, d.tool.Outline, d.tool.ZIndex, d.tool.Visible = true, true, 5, false
+
+    -- Ping status dot
+    d.dot = reg(NewDrawing("Circle"))
+    d.dot.Filled, d.dot.NumSides, d.dot.Thickness, d.dot.ZIndex, d.dot.Visible = true, 16, 1, 5, false
+
+    -- Skeleton (R6 uses 5 of the 14 lines)
+    d.bones = {}
+    for i = 1, BONE_COUNT do
+        local l = NewDrawing("Line")
+        l.Thickness, l.Transparency, l.ZIndex, l.Visible = Config.Skeleton.Thickness or 1, alpha(Config.Skeleton.Opacity or 0.9), 2, false
+        reg(l); d.bones[i] = l
+    end
+
+    -- Tracer
+    d.tracer = reg(NewDrawing("Line"))
+    d.tracer.Thickness, d.tracer.Transparency, d.tracer.ZIndex, d.tracer.Visible = Config.Tracers.Thickness or 1, alpha(Config.Tracers.Opacity or 0.9), 1, false
+
+    return {
+        d = d, all = all,
+        last = {
+            box = {}, boxO = {}, bones = {}, fill = {}, hpBG = {}, hpFG = {},
+            name = {}, dist = {}, hpNum = {}, dot = {}, tracer = {},
+            tool = {},
+        },
+        hidden = true, plr = nil,
+        char = nil, root = nil, hum = nil, bones = nil,
+        rayParams = RaycastParams.new(),
+        shownHP = 1, pingT = 0, pingMs = nil, hasBounds = nil,
+        conns = nil,
+    }
+end
+
+-- Applies config-dependent static properties (on acquire + EspLib.Refresh).
+local function applyStatic(data)
+    local d = data.d
+    if not d then return end
+    for i = 1, 8 do
+        d.box[i].Thickness = 1
+        d.box[i].Transparency = alpha(Config.Box.Opacity or 1)
+        d.boxO[i].Thickness = 3
+        d.boxO[i].Transparency = alpha(Config.Box.OutlineOpacity or 0.85)
+        d.boxO[i].Color = Config.Colors.Outline
+    end
+    d.fill.Transparency = alpha(Config.Box.FillOpacity or 0.5)
+    d.hpBG.Transparency = alpha(0.7)
+    d.hpFG.Transparency = alpha(1)
+    setTextSize(d.name, Config.Name.Size or 14)
+    setTextFont(d.name, Config.Font)
+    setTextOutline(d.name, Config.Colors.Outline)
+    setTextSize(d.dist, Config.Distance.Size or 12)
+    setTextFont(d.dist, Config.Font)
+    setTextOutline(d.dist, Config.Colors.Outline)
+    setTextSize(d.hpNum, Config.HealthBar.NumberSize or 11)
+    setTextFont(d.hpNum, Config.Font)
+    setTextOutline(d.hpNum, Config.Colors.Outline)
+    d.hpNum.Center = (Config.HealthBar.NumberPosition == "Left") and true or false
+    d.dist.Center = (Config.Distance.Position ~= "TopRight") and true or false
+    setTextSize(d.tool, Config.ToolText.Size or 12)
+    setTextFont(d.tool, Config.Font)
+    setTextOutline(d.tool, Config.Colors.Outline)
+    for i = 1, BONE_COUNT do
+        d.bones[i].Thickness = Config.Skeleton.Thickness or 1
+        d.bones[i].Transparency = alpha(Config.Skeleton.Opacity or 0.9)
+    end
+    d.tracer.Thickness = Config.Tracers.Thickness or 1
+    d.tracer.Transparency = alpha(Config.Tracers.Opacity or 0.9)
+end
+
+local function removeDrawing(o)
+    if not pcall(o.Remove, o) then pcall(o.Destroy, o) end
+end
+
+local function destroyBundle(data)
+    local all = data.all
+    if all then
+        for i = 1, #all do removeDrawing(all[i]) end
+    end
+    data.d, data.all, data.last = nil, nil, nil
+end
+
+local MAX_POOL = 8
+
+local function poolAcquire()
+    local data = table.remove(pool) or makeBundle()
+    applyStatic(data)
+    return data
+end
+
+local function poolRelease(data)
+    hidePlayer(data)
+    data.plr, data.char, data.root, data.hum = nil, nil, nil, nil
+    data.bones, data.conns = nil, nil
+    if #pool < MAX_POOL then
+        pool[#pool + 1] = data
+    else
+        destroyBundle(data)
+    end
+end
+
+
+--══════════════════════════════════════════════════════════════════════════
+-- 7. LIFECYCLE — CreateESP / RemoveESP
+--══════════════════════════════════════════════════════════════════════════
+
+local function CreateESP(plr)
+    if not plr or plr == LocalPlayer or objects[plr] then return end
+    local data = poolAcquire()
+    data.plr = plr
+    data.hasBounds = nil -- re-probe TextBounds support for this bundle
+    data.pingT, data.pingMs = 0, nil
+    objects[plr] = data
+
+    local conns = {}
+    conns[#conns + 1] = plr.CharacterAdded:Connect(function(char)
+        if objects[plr] == data then bindCharacter(data, char) end
+    end)
+    conns[#conns + 1] = plr.CharacterRemoving:Connect(function()
+        data.char, data.root, data.hum, data.bones = nil, nil, nil, nil
+        destroyChams(data)
+        hidePlayer(data)
+    end)
+    data.conns = conns
+
+    if plr.Character then bindCharacter(data, plr.Character) end
+end
+
+local function RemoveESP(plr, destroy)
+    local data = plr and objects[plr]
+    if not data then return end
+    objects[plr] = nil
+    if data.conns then
+        for i = 1, #data.conns do
+            pcall(data.conns[i].Disconnect, data.conns[i])
+        end
+        data.conns = nil
+    end
+    destroyChams(data)
+    if destroy then
+        destroyBundle(data)
+    else
+        poolRelease(data)
+    end
+end
+
+--══════════════════════════════════════════════════════════════════════════
+-- 8. PER-FRAME RENDER — UpdateESP
+--══════════════════════════════════════════════════════════════════════════
+
+local function updatePlayer(data, dt, camPos, viewport, myTeam)
+    local plr = data.plr
+    if not plr or not data.d then return hidePlayer(data) end
+    local d = data.d
+
+    -- ── resolve character references ─────────────────────────────────────
+    local char = plr.Character
+    if not char then return hidePlayer(data) end
+    if data.char ~= char then bindCharacter(data, char) end
+
+    local root, hum = data.root, data.hum
+    if not root or not hum then
+        -- Character may still be streaming in; (re)acquire references.
+        root = char:FindFirstChild("HumanoidRootPart")
+        hum  = char:FindFirstChildOfClass("Humanoid")
+        data.root, data.hum = root, hum
+        if not root or not hum then return hidePlayer(data) end
+    end
+    if hum.Health <= 0 then return hidePlayer(data) end
+
+    -- ── culling: distance / team / screen / walls ────────────────────────
+    local rootPos = root.Position
+    local dist = (rootPos - camPos).Magnitude
+    if dist > Config.MaxDistance then return hidePlayer(data) end
+
+    local sameTeam = (myTeam ~= nil and plr.Team == myTeam)
+    if Config.TeamCheck and sameTeam then return hidePlayer(data) end
+
+    -- ── bounding box (auto-scaled to the character's real bounds) ────────
+    local anchorPos, hs = rootPos, Config.Box.HeightScale or 3
+    if data.boundCenter and data.boundSize then
+        anchorPos = data.boundCenter
+        hs = data.boundSize.Y * 0.5
+    end
+    local center, onScreen = Camera:WorldToViewportPoint(anchorPos)
+    if not onScreen or center.Z <= 0 or center.X ~= center.X then
+        return hidePlayer(data) -- off screen / behind camera / NaN
+    end
+
+    local occluded = false
+    if Config.WallCheck then
+        occluded = isOccluded(camPos, rootPos, dist, data.rayParams)
+        if occluded and Config.VisibleOnly then return hidePlayer(data) end
+    end
+
+    -- ── palette ──────────────────────────────────────────────────────────
+    local col = Config.Colors.Enemy
+    if Config.UseTeamColor and plr.TeamColor then
+        col = plr.TeamColor.Color
+    elseif sameTeam then
+        col = Config.Colors.Friendly
+    end
+    if occluded then col = dimColor(col, Config.Colors.Dim or 0.45) end
+    data.hidden = false
+
+    -- ── bounding box (3 projections, pixel-aligned) ──────────────────────
+    local topP = Camera:WorldToViewportPoint(anchorPos + Vector3.new(0, hs, 0))
+    local botP = Camera:WorldToViewportPoint(anchorPos - Vector3.new(0, hs, 0))
+    local boxH = botP.Y - topP.Y
+    if boxH ~= boxH or boxH < 2 then return hidePlayer(data) end -- NaN / degenerate
+
+    local boxW
+    if data.boundSize then
+        -- auto-scale: width from the character's real horizontal extent
+        boxW = math.max(data.boundSize.X, data.boundSize.Z) * (boxH / data.boundSize.Y)
+    else
+        boxW = boxH * getBoxWidthRatio(data)
+    end
+    local bx = round(center.X - boxW * 0.5)
+    local by = round(topP.Y)
+    local bw = round(boxW)
+    local bh = round(boxH)
+
+    local count = Config.Box.Enabled and buildSegments(bx, by, bw, bh) or 0
+    for i = 1, 8 do
+        local line, out = d.box[i], d.boxO[i]
+        if i <= count then
+            local s = SEG[i]
+            setLine(line, data.last.box, i, s[1], s[2], s[3], s[4])
+            setColor(line, col)
+            setVisible(line, true)
+            if Config.Box.Outline then
+                setLine(out, data.last.boxO, i, s[1], s[2], s[3], s[4])
+                setVisible(out, true)
+            else
+                setVisible(out, false)
+            end
+        else
+            setVisible(line, false)
+            setVisible(out, false)
+        end
+    end
+
+    -- ── box fill ─────────────────────────────────────────────────────────
+    if Config.Box.Enabled and Config.Box.Fill then
+        setRect(d.fill, data.last.fill, 1,
+            bx + 2, by + 2, math.max(bw - 4, 1), math.max(bh - 4, 1))
+        setColor(d.fill, Config.Colors.Fill or col)
+        setVisible(d.fill, true)
+    else
+        setVisible(d.fill, false)
+    end
+
+
+    -- ── health bar (animated lerp, red -> green gradient) ────────────────
+    local hb = Config.HealthBar
+    if hb.Enabled then
+        local max = hum.MaxHealth
+        local target = clamp(hum.Health / (max > 0 and max or 100), 0, 1)
+        if hb.Smooth then
+            local a = clamp((dt or 0.016) * (hb.SmoothSpeed or 12), 0, 1)
+            data.shownHP = data.shownHP + (target - data.shownHP) * a
+            if math.abs(target - data.shownHP) < 0.002 then
+                data.shownHP = target
+            end
+        else
+            data.shownHP = target
+        end
+        local shown = data.shownHP
+        local th = math.max(hb.Thickness or 4, 3)
+        local pad = hb.Padding or 3
+        local hc = healthColor(shown)
+
+        if hb.Side == "Bottom" then
+            setRect(d.hpBG, data.last.hpBG, 1, bx - 1, by + bh + pad, bw + 2, th)
+            setRect(d.hpFG, data.last.hpFG, 1, bx, by + bh + pad + 1,
+                math.max(round((bw - 2) * shown), 1), th - 2)
+        else
+            setRect(d.hpBG, data.last.hpBG, 1, bx - pad - th, by - 1, th, bh + 2)
+            local fh = math.max(round(bh * shown), 1)
+            setRect(d.hpFG, data.last.hpFG, 1, bx - pad - th + 1, by + bh - fh, th - 2, fh)
+        end
+        setColor(d.hpBG, Config.Colors.Outline)
+        setColor(d.hpFG, hc)
+        setVisible(d.hpBG, true)
+        setVisible(d.hpFG, true)
+
+        if hb.ShowNumber then
+            local nx, ny
+            local npos = hb.NumberPosition or "Left"
+            if npos == "TopLeft" then
+                nx, ny = bx, by - (hb.NumberSize or 11) - 3
+            elseif npos == "Left" then
+                nx, ny = bx - pad - th - 12, by + 2
+            elseif hb.Side == "Bottom" then
+                nx, ny = bx + bw + 4, by + bh + pad
+            else
+                nx = bx + bw + 4
+                ny = by + bh - round(bh * shown) - 6
+                if ny < by then ny = by end
+            end
+            setText(d.hpNum, data.last.hpNum, tostring(math.ceil(hum.Health)), nx, ny)
+            setColor(d.hpNum, hc)
+            setVisible(d.hpNum, true)
+        else
+            setVisible(d.hpNum, false)
+        end
+    else
+        setVisible(d.hpBG, false)
+        setVisible(d.hpFG, false)
+        setVisible(d.hpNum, false)
+    end
+
+    -- ── name + distance (outlined, centered, pixel aligned) ──────────────
+    local nameSize = Config.Name.Size or 14
+    local nameY = by - nameSize - 5
+    if Config.Name.Enabled then
+        local label = Config.Name.UseDisplayName and plr.DisplayName or plr.Name
+        setText(d.name, data.last.name, label, round(center.X), nameY)
+        setColor(d.name, Config.Colors.Name)
+        setVisible(d.name, true)
+    else
+        setVisible(d.name, false)
+    end
+
+    if Config.Distance.Enabled then
+        local dx, dy
+        if Config.Distance.Position == "TopRight" then
+            dx, dy = bx + bw + 4, by
+        else
+            dx = round(center.X)
+            dy = Config.Name.Enabled and (nameY + nameSize + 1)
+                or (by - (Config.Distance.Size or 12) - 5)
+        end
+        setText(d.dist, data.last.dist,
+            string.format("%dm", math.floor(dist + 0.5)), dx, dy)
+        setColor(d.dist, Config.Colors.Distance)
+        setVisible(d.dist, true)
+    else
+        setVisible(d.dist, false)
+    end
+
+    -- ── tool text (equipped weapon name under the box) ───────────────────
+    local tt = Config.ToolText
+    if tt.Enabled then
+        local tool = char:FindFirstChildOfClass("Tool")
+        if tool then
+            local ty = by + bh + 5
+            if Config.HealthBar.Enabled and Config.HealthBar.Side == "Bottom" then
+                ty = ty + (Config.HealthBar.Padding or 3) + (Config.HealthBar.Thickness or 4)
+            end
+            setText(d.tool, data.last.tool, tool.Name, round(center.X), ty)
+            setColor(d.tool, Config.Colors.Distance)
+            setVisible(d.tool, true)
+        else
+            setVisible(d.tool, false)
+        end
+    else
+        setVisible(d.tool, false)
+    end
+
+
+    -- ── ping status dot (uses TextBounds when the executor exposes it) ───
+    local pd = Config.PingDot
+    if pd.Enabled and Config.Name.Enabled then
+        if data.hasBounds == nil then
+            local ok, b = pcall(function() return d.name.TextBounds end)
+            data.hasBounds = (ok and b ~= nil) and true or false
+        end
+        local placed = false
+        if data.hasBounds then
+            local b = d.name.TextBounds
+            if b and b.X and b.X > 0 then
+                data.pingT = data.pingT + (dt or 0)
+                if data.pingMs == nil or data.pingT >= 1 then
+                    data.pingT = 0
+                    local okP, s = pcall(plr.GetNetworkPing, plr)
+                    data.pingMs = (okP and s and s > 0)
+                        and math.floor(s * 2000 + 0.5) or 0 -- approx RTT ms
+                end
+                local ms = data.pingMs or 0
+                local pc
+                if ms <= (pd.GoodMs or 80) then pc = Config.Colors.PingGood
+                elseif ms <= (pd.OkayMs or 160) then pc = Config.Colors.PingOkay
+                else pc = Config.Colors.PingBad end
+                setCircle(d.dot, data.last.dot,
+                    round(center.X - b.X * 0.5) - 8,
+                    round(nameY + nameSize * 0.5), pd.Radius or 2)
+                setColor(d.dot, pc)
+                setVisible(d.dot, true)
+                placed = true
+            end
+        end
+        if not placed then setVisible(d.dot, false) end
+    else
+        setVisible(d.dot, false)
+    end
+
+    -- ── skeleton (hide individual bones that fail to project) ────────────
+    if Config.Skeleton.Enabled and data.bones then
+        local scol = Config.Colors.Skeleton or col
+        for i = 1, BONE_COUNT do
+            local line = d.bones[i]
+            local bone = data.bones[i]
+            local drawn = false
+            if bone then
+                local p1, p2 = bone[1], bone[2]
+                if p1 and p2 and p1.Parent and p2.Parent then
+                    local a, aOn = Camera:WorldToViewportPoint(p1.Position)
+                    local b2, bOn = Camera:WorldToViewportPoint(p2.Position)
+                    if aOn and bOn and a.Z > 0 and b2.Z > 0 then
+                        setLine(line, data.last.bones, i,
+                            round(a.X), round(a.Y), round(b2.X), round(b2.Y))
+                        setColor(line, scol)
+                        setVisible(line, true)
+                        drawn = true
+                    end
+                end
+            end
+            if not drawn then setVisible(line, false) end
+        end
+    else
+        for i = 1, BONE_COUNT do setVisible(d.bones[i], false) end
+    end
+
+    -- ── tracer ───────────────────────────────────────────────────────────
+    local tr = Config.Tracers
+    if tr.Enabled then
+        local ox = round(viewport.X * 0.5)
+        local oy = viewport.Y
+        if tr.Origin == "Center" then oy = round(viewport.Y * 0.5)
+        elseif tr.Origin == "Top" then oy = 0 end
+        setLine(d.tracer, data.last.tracer, 1, ox, oy, round(center.X), by + bh)
+        setColor(d.tracer, col)
+        setVisible(d.tracer, true)
+    else
+        setVisible(d.tracer, false)
+    end
+end
+
+local function UpdateESP(dt)
+    Camera = Workspace.CurrentCamera or Camera
+    if not Camera then return end
+    local camPos = Camera.CFrame.Position
+    local viewport = Camera.ViewportSize
+    local myTeam = LocalPlayer and LocalPlayer.Team or nil
+    for _, data in pairs(objects) do
+        updatePlayer(data, dt, camPos, viewport, myTeam)
+    end
+end
+
+
+--══════════════════════════════════════════════════════════════════════════
+-- 9. FRAME LOOP, EVENTS & PUBLIC API
+--══════════════════════════════════════════════════════════════════════════
+
+local RENDER_NAME = "EspLib_RenderStep"
+
+local function onStep(dt)
+    if not running then return end
+    if not Config.Enabled then
+        for _, data in pairs(objects) do hidePlayer(data) end
+        return
+    end
+    UpdateESP(dt)
+end
+
+-- Prefer BindToRenderStep (runs right after the camera updates -> zero lag);
+-- fall back to a plain RenderStepped connection on older executors.
+do
+    local bound = pcall(function()
+        RunService:BindToRenderStep(RENDER_NAME, Enum.RenderPriority.Camera.Value + 1, onStep)
+    end)
+    if not bound then
+        connections[#connections + 1] = RunService.RenderStepped:Connect(onStep)
+    end
+end
+
+-- Full cleanup: disconnects events, destroys every pooled Drawing object
+-- and removes the EspLib global. Safe to call twice.
+local function Unload()
+    if not running then return end
+    running = false
+    pcall(function() RunService:UnbindFromRenderStep(RENDER_NAME) end)
+    for i = 1, #connections do
+        pcall(connections[i].Disconnect, connections[i])
+    end
+    connections = {}
+    for plr in pairs(objects) do
+        RemoveESP(plr, true)
+    end
+    while #pool > 0 do
+        destroyBundle(table.remove(pool))
+    end
+    if FallbackGui then
+        pcall(function() FallbackGui:Destroy() end)
+        FallbackGui = nil
+    end
+    GLOBAL.EspLib = nil
+    GLOBAL.TypeShit = nil
+end
+
+EspLib = {
+    _VERSION = "1.2.0",
+    Config   = Config,
+
+    Toggle = function(state)
+        if state == nil then
+            Config.Enabled = not Config.Enabled
+        else
+            Config.Enabled = state and true or false
+        end
+        return Config.Enabled
+    end,
+    IsEnabled = function() return Config.Enabled end,
+    CreateESP = CreateESP,
+    RemoveESP = function(plr) RemoveESP(plr, false) end,
+    UpdateESP = function(dt)
+        if running then UpdateESP(dt or (1 / 60)) end
+    end,
+    Refresh = function()
+        for _, data in pairs(objects) do applyStatic(data) end
+    end,
+    GetBundle = function(plr) return objects[plr] end,
+    Rebind = function()
+        -- re-runs character binding: recomputes auto-scale bounds and
+        -- recreates chams with the current config
+        for _, data in pairs(objects) do
+            if data.char then bindCharacter(data, data.char) end
+        end
+    end,
+    Unload    = Unload,
+
+    -- internals, exposed for debugging and testing
+    _internal = { objects = objects, pool = pool, Config = Config },
+}
+GLOBAL.EspLib = EspLib
+GLOBAL.TypeShit = EspLib -- branded alias (typeshit.cc private)
+
+-- Keep raycast exclusions valid when the local character respawns.
+pcall(function()
+    connections[#connections + 1] = LocalPlayer.CharacterAdded:Connect(function()
+        for _, data in pairs(objects) do
+            if data.char then bindCharacter(data, data.char) end
+        end
+    end)
 end)
 
-function library:toggle_menu()
-	local window = library.window
+-- Follow camera swaps and roster changes.
+connections[#connections + 1] = Workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
+    Camera = Workspace.CurrentCamera
+end)
+connections[#connections + 1] = Players.PlayerAdded:Connect(CreateESP)
+connections[#connections + 1] = Players.PlayerRemoving:Connect(function(plr)
+    RemoveESP(plr, false)
+end)
 
-	if not window then
-		return
-	end
-
-	library.open = not library.open
-
-	if library.current_element_open then
-		library.current_element_open.set_visible(false)
-		library.current_element_open.open = false
-		library.current_element_open = nil
-	end
-
-	library:remove_tooltip()
-
-	local target = library.open and 0 or 1
-	library:tween(window.holder, 0.22, { GroupTransparency = target })
-	window.holder.Visible = true
+-- Optional hotkey (set Config.ToggleKey, e.g. Enum.KeyCode.RightControl).
+if Config.ToggleKey then
+    pcall(function()
+        local UIS = game:GetService("UserInputService")
+        connections[#connections + 1] = UIS.InputBegan:Connect(function(input, gameProcessed)
+            if gameProcessed then return end
+            if input and input.KeyCode == Config.ToggleKey then EspLib.Toggle() end
+        end)
+    end)
 end
 
-function library:unload()
-	library.gui:Destroy()
-
-	for _, connection in next, library.connections do
-		pcall(function()
-			connection:Disconnect()
-		end)
-	end
-
-	table.clear(library.connections)
-	table.clear(library.instances)
-
-	getgenv().typeshit = nil
+-- Track players that already exist.
+for _, plr in ipairs(Players:GetPlayers()) do
+    CreateESP(plr)
 end
 
---// notifications (top right, cozy slide-in)
-function library:notification(properties)
-	local cfg = {
-		time = properties.time or properties.duration or 5,
-		text = properties.text or properties.name or "notification",
-	}
-
-	local function refresh_notifications()
-		for index, notification in next, library.notifications do
-			library:tween(notification, 0.3, { Position = dim2(1, -14, 0, 14 + ((index - 1) * 34)) })
-		end
-	end
-
-	local holder = library:create("Frame", {
-		Parent = library.gui,
-		Name = "notification",
-		ZIndex = 150,
-		AnchorPoint = vec2(1, 0),
-		Position = dim2(1, -14, 0, 14 + (#library.notifications * 34)),
-		Size = dim2(0, 0, 0, 28),
-		AutomaticSize = Enum.AutomaticSize.X,
-		BackgroundColor3 = library.theme.contrast,
-		BorderSizePixel = 0,
-	})
-
-	library:corner(holder, 5)
-	library:stroke(holder, library.theme.inline, 1)
-
-	local accent = library:create("Frame", {
-		Parent = holder,
-		Position = dim2(0, 0, 0, 0),
-		Size = dim2(0, 3, 1, 0),
-		BackgroundColor3 = library.theme.accent,
-		BorderSizePixel = 0,
-		ZIndex = 151,
-	})
-
-	library:corner(accent, 5)
-	register_theme(accent, "accent", "BackgroundColor3")
-
-	local label = library:create("TextLabel", {
-		Parent = holder,
-		Font = library.font,
-		Text = cfg.text,
-		TextSize = library.text_size,
-		TextColor3 = library.theme.text,
-		BackgroundTransparency = 1,
-		TextXAlignment = Enum.TextXAlignment.Left,
-		Position = dim2(0, 12, 0, 0),
-		Size = dim2(0, 0, 1, 0),
-		AutomaticSize = Enum.AutomaticSize.X,
-		ZIndex = 151,
-	})
-
-	library:padding(holder, 0, 14, 0, 0)
-
-	insert(library.notifications, holder)
-
-	task.delay(cfg.time, function()
-		local index = find(library.notifications, holder)
-
-		if index then
-			remove(library.notifications, index)
-		end
-
-		library:tween(holder, 0.35, { BackgroundTransparency = 1 })
-		library:tween(label, 0.3, { TextTransparency = 1 })
-		library:tween(accent, 0.3, { BackgroundTransparency = 1 })
-
-		local stroke = holder:FindFirstChildOfClass("UIStroke")
-
-		if stroke then
-			library:tween(stroke, 0.3, { Transparency = 1 })
-		end
-
-		refresh_notifications()
-		task.wait(0.35)
-		holder:Destroy()
-	end)
-
-	refresh_notifications()
-end
-
---// window
-function library:window(properties)
-	local cfg = {
-		name = properties.name or properties.Name or "typeshit.cc",
-		size = properties.size or properties.Size or dim2(0, 580, 0, 420),
-		menu_key = properties.menu_key or properties.MenuKey or Enum.KeyCode.RightShift,
-		tabs = {},
-	}
-
-	library.menu_key = cfg.menu_key
-
-	-- soft drop shadow
-	local shadow = library:create("ImageLabel", {
-		Parent = library.gui,
-		Name = "shadow",
-		ZIndex = 1,
-		BackgroundTransparency = 1,
-		Image = "http://www.roblox.com/asset/?id=6014261993",
-		ImageColor3 = rgb(0, 0, 0),
-		ImageTransparency = 0.45,
-		ScaleType = Enum.ScaleType.Slice,
-		SliceCenter = rect(vec2(49, 49), vec2(450, 450)),
-	})
-
-	-- canvas group holder so we can fade the whole menu
-	local holder = library:create("CanvasGroup", {
-		Parent = library.gui,
-		Name = "window",
-		ZIndex = 2,
-		GroupTransparency = 0,
-		BorderSizePixel = 0,
-	})
-
-	cfg.holder = holder
-
-	local main = library:create("Frame", {
-		Parent = holder,
-		Name = "main",
-		Size = dim2(1, 0, 1, 0),
-		BackgroundColor3 = library.theme.background,
-		BorderSizePixel = 0,
-	})
-
-	library:corner(main, 8)
-	register_theme(main, "background", "BackgroundColor3")
-
-	local outline = library:stroke(main, library.theme.outline, 1)
-	register_theme(outline, "outline", "Color")
-
-	shadow.AnchorPoint = vec2(0.5, 0.5)
-	shadow.Position = dim2(0.5, 0, 0.5, 4)
-
-	local function apply_size(size)
-		cfg.size = size
-		holder.Size = size
-		shadow.Size = dim2(0, size.X.Offset + 70, 0, size.Y.Offset + 70)
-	end
-
-	apply_size(cfg.size)
-	holder.Position = dim2(0.5, -cfg.size.X.Offset / 2, 0.5, -cfg.size.Y.Offset / 2)
-	library.window = cfg
-
-	-- header
-	local header = library:create("TextButton", {
-		Parent = main,
-		Name = "header",
-		Size = dim2(1, 0, 0, 30),
-		BackgroundColor3 = library.theme.background,
-		BorderSizePixel = 0,
-		Text = "",
-		AutoButtonColor = false,
-	})
-
-	library:corner(header, 8)
-
-	local header_accent = library:create("Frame", {
-		Parent = header,
-		Position = dim2(0, 10, 1, -5),
-		Size = dim2(0, 4, 0, 4),
-		BackgroundColor3 = library.theme.accent,
-		BorderSizePixel = 0,
-	})
-
-	library:corner(header_accent, 2)
-	register_theme(header_accent, "accent", "BackgroundColor3")
-
-	local title = library:create("TextLabel", {
-		Parent = header,
-		Font = library.font,
-		Text = cfg.name,
-		TextSize = library.text_size,
-		TextColor3 = library.theme.text,
-		BackgroundTransparency = 1,
-		TextXAlignment = Enum.TextXAlignment.Left,
-		Position = dim2(0, 22, 0, 0),
-		Size = dim2(1, -60, 1, 0),
-	})
-
-	register_theme(title, "text", "TextColor3")
-
-	-- minimize button
-	local minimize = library:create("TextButton", {
-		Parent = header,
-		Font = library.font,
-		Text = "-",
-		TextSize = library.text_size,
-		TextColor3 = library.theme.muted_text,
-		BackgroundTransparency = 1,
-		AnchorPoint = vec2(1, 0.5),
-		Position = dim2(1, -10, 0.5, 0),
-		Size = dim2(0, 16, 0, 16),
-	})
-
-	minimize.MouseEnter:Connect(function()
-		library:tween(minimize, 0.15, { TextColor3 = library.theme.text })
-	end)
-
-	minimize.MouseLeave:Connect(function()
-		library:tween(minimize, 0.15, { TextColor3 = library.theme.muted_text })
-	end)
-
-	-- body
-	local body = library:create("Frame", {
-		Parent = main,
-		Name = "body",
-		Position = dim2(0, 0, 0, 26),
-		Size = dim2(1, 0, 1, -26),
-		BackgroundColor3 = library.theme.background,
-		BorderSizePixel = 0,
-	})
-
-	register_theme(body, "background", "BackgroundColor3")
-
-	-- sidebar (rune style: vertical tabs)
-	local sidebar = library:create("Frame", {
-		Parent = body,
-		Name = "sidebar",
-		Size = dim2(0, 108, 1, 0),
-		BackgroundColor3 = library.theme.contrast,
-		BorderSizePixel = 0,
-	})
-
-	library:corner(sidebar, 8)
-	register_theme(sidebar, "contrast", "BackgroundColor3")
-	library:padding(sidebar, 0, 0, 6, 6)
-	library:list(sidebar, 2)
-
-	-- content columns
-	local content = library:create("Frame", {
-		Parent = body,
-		Name = "content",
-		Position = dim2(0, 108, 0, 0),
-		Size = dim2(1, -108, 1, 0),
-		BackgroundTransparency = 1,
-	})
-
-	library:padding(content, 8, 8, 2, 8)
-
-	local columns = library:create("Frame", {
-		Parent = content,
-		Size = dim2(1, 0, 1, 0),
-		BackgroundTransparency = 1,
-	})
-
-	library:list(columns, 6, Enum.FillDirection.Horizontal, Enum.HorizontalAlignment.Center)
-
-	cfg.header = header
-	cfg.main = main
-	cfg.body = body
-	cfg.sidebar = sidebar
-	cfg.columns = columns
-
-	-- dragging
-	local dragging, drag_start, start_position
-
-	header.InputBegan:Connect(function(input)
-		if input.UserInputType == Enum.UserInputType.MouseButton1 then
-			dragging = true
-			drag_start = input.Position
-			start_position = holder.Position
-		end
-	end)
-
-	library:connection(uis.InputEnded, function(input)
-		if input.UserInputType == Enum.UserInputType.MouseButton1 then
-			dragging = false
-		end
-	end)
-
-	-- resizing (bottom right grip)
-	local grip = library:create("TextButton", {
-		Parent = main,
-		Text = "",
-		BackgroundTransparency = 1,
-		Position = dim2(1, -14, 1, -14),
-		Size = dim2(0, 14, 0, 14),
-		AutoButtonColor = false,
-	})
-
-	local resizing, resize_start, start_size
-	start_size = cfg.size
-
-	grip.InputBegan:Connect(function(input)
-		if input.UserInputType == Enum.UserInputType.MouseButton1 then
-			resizing = true
-			drag_start = input.Position
-			start_size = dim2(0, main.AbsoluteSize.X, 0, main.AbsoluteSize.Y)
-		end
-	end)
-
-	library:connection(uis.InputEnded, function(input)
-		if input.UserInputType == Enum.UserInputType.MouseButton1 then
-			resizing = false
-		end
-	end)
-
-	library:connection(uis.InputChanged, function(input)
-		if input.UserInputType == Enum.UserInputType.MouseMovement then
-			if dragging then
-				local delta = input.Position - drag_start
-				local viewport_size = camera.ViewportSize
-				local x = clamp(start_position.X.Offset + delta.X, -main.Size.X.Offset + 130, viewport_size.X - 70)
-				local y = clamp(start_position.Y.Offset + delta.Y, 0, viewport_size.Y - 42)
-
-				holder.Position = dim2(0, x, 0, y)
-			elseif resizing then
-				local viewport_size = camera.ViewportSize
-				local width = clamp(start_size.X.Offset + (input.Position.X - drag_start.X), 460, viewport_size.X)
-				local height = clamp(start_size.Y.Offset + (input.Position.Y - drag_start.Y), 340, viewport_size.Y)
-
-				apply_size(dim2(0, width, 0, height))
-			end
-		end
-	end)
-
-	-- minimize
-	local minimized = false
-
-	minimize.MouseButton1Click:Connect(function()
-		minimized = not minimized
-
-		if minimized then
-			library:tween(body, 0.2, { Size = dim2(1, 0, 0, 0) })
-			library:tween(holder, 0.2, { Size = dim2(0, main.Size.X.Offset, 0, 28) })
-			shadow.Size = dim2(0, main.Size.X.Offset + 70, 0, 98)
-		else
-			library:tween(body, 0.2, { Size = dim2(1, 0, 1, -26) })
-			library:tween(holder, 0.2, { Size = dim2(0, main.Size.X.Offset, 0, cfg.size.Y.Offset) })
-			shadow.Size = dim2(0, main.Size.X.Offset + 70, 0, cfg.size.Y.Offset + 70)
-		end
-	end)
-
-	function cfg.set_size(size)
-		cfg.size = size
-		apply_size(size)
-	end
-
-
-	return setmetatable(cfg, library)
-end
-
---// tab (rune style: stacked sidebar buttons)
-function library:tab(properties)
-	local cfg = {
-		name = properties.name or properties.Name or "tab",
-		window = self,
-	}
-
-	local window = self
-
-	-- sidebar button
-	local button = library:create("TextButton", {
-		Parent = window.sidebar,
-		Font = library.font,
-		Text = cfg.name,
-		TextSize = library.text_size,
-		TextColor3 = library.theme.muted_text,
-		TextXAlignment = Enum.TextXAlignment.Left,
-		Size = dim2(1, 0, 0, 24),
-		BackgroundColor3 = library.theme.contrast,
-		BorderSizePixel = 0,
-		AutoButtonColor = false,
-	})
-
-	library:corner(button, 5)
-	register_theme(button, "contrast", "BackgroundColor3")
-
-	local indicator = library:create("Frame", {
-		Parent = button,
-		Position = dim2(0, 0, 0, 4),
-		Size = dim2(0, 2, 1, -8),
-		BackgroundColor3 = library.theme.accent,
-		BorderSizePixel = 0,
-		Visible = false,
-	})
-
-	library:corner(indicator, 2)
-	register_theme(indicator, "accent", "BackgroundColor3")
-
-	library:padding(button, 12, 6, 0, 0)
-
-	-- tab page
-	local page = library:create("Frame", {
-		Parent = window.columns,
-		Visible = false,
-		Size = dim2(1, 0, 1, 0),
-		BackgroundTransparency = 1,
-	})
-
-	library:list(page, 6, Enum.FillDirection.Horizontal, Enum.HorizontalAlignment.Center)
-
-	-- left / right scroll columns
-	local left = library:create("ScrollingFrame", {
-		Parent = page,
-		BackgroundTransparency = 1,
-		BorderSizePixel = 0,
-		Size = dim2(0.5, -3, 1, 0),
-		CanvasSize = dim2(0, 0, 0, 0),
-		AutomaticCanvasSize = Enum.AutomaticSize.Y,
-		ScrollBarThickness = 1,
-		ScrollBarImageColor3 = library.theme.inline,
-		ScrollingDirection = Enum.ScrollingDirection.Y,
-	})
-
-	local right = library:create("ScrollingFrame", {
-		Parent = page,
-		BackgroundTransparency = 1,
-		BorderSizePixel = 0,
-		Visible = false,
-		Size = dim2(0.5, -3, 1, 0),
-		CanvasSize = dim2(0, 0, 0, 0),
-		AutomaticCanvasSize = Enum.AutomaticSize.Y,
-		ScrollBarThickness = 1,
-		ScrollBarImageColor3 = library.theme.inline,
-		ScrollingDirection = Enum.ScrollingDirection.Y,
-	})
-
-	cfg.buttons = { button = button, indicator = indicator, page = page }
-	cfg.left = left
-	cfg.right = right
-	cfg.column_count = 0
-
-	function cfg.open_tab()
-		local current = library.current_tab
-
-		if current then
-			if current == cfg then
-				return
-			end
-
-			current.buttons.button.TextColor3 = library.theme.muted_text
-			current.buttons.indicator.Visible = false
-			current.buttons.page.Visible = false
-		end
-
-		if library.current_element_open then
-			library.current_element_open.set_visible(false)
-			library.current_element_open.open = false
-			library.current_element_open = nil
-		end
-
-		library.current_tab = cfg
-
-		button.TextColor3 = library.theme.text
-		indicator.Visible = true
-		page.Visible = true
-	end
-
-	button.MouseButton1Click:Connect(function()
-		cfg.open_tab()
-	end)
-
-	-- open first tab by default
-	task.defer(function()
-		if library.current_tab == nil then
-			cfg.open_tab()
-		end
-	end)
-
-	return setmetatable(cfg, library)
-end
-
---// section
-function library:section(properties)
-	local cfg = {
-		name = properties.name or properties.Name or "section",
-		side = properties.side or properties.Side or "left",
-		fill = properties.fill or properties.Fill,
-		window = self,
-	}
-
-	local side = cfg.side == "right" and "right" or "left"
-
-	if cfg.fill then
-		self[side].Size = dim2(cfg.fill, -3, 1, 0)
-	end
-
-	self[side].Visible = true
-
-	-- panel
-	local panel = library:create("Frame", {
-		Parent = self[side],
-		Size = dim2(1, 0, 0, 0),
-		AutomaticSize = Enum.AutomaticSize.Y,
-		BackgroundColor3 = library.theme.contrast,
-		BorderSizePixel = 0,
-	})
-
-	library:corner(panel, 6)
-	register_theme(panel, "contrast", "BackgroundColor3")
-
-	local panel_stroke = library:stroke(panel, library.theme.outline, 1)
-	register_theme(panel_stroke, "outline", "Color")
-
-	-- title
-	local title = library:create("TextLabel", {
-		Parent = panel,
-		Font = library.font,
-		Text = cfg.name,
-		TextSize = library.text_size,
-		TextColor3 = library.theme.text,
-		TextXAlignment = Enum.TextXAlignment.Left,
-		Position = dim2(0, 0, 0, 0),
-		Size = dim2(1, 0, 0, 24),
-		BackgroundTransparency = 1,
-	})
-
-	library:padding(title, 10, 10, 0, 0)
-	register_theme(title, "text", "TextColor3")
-
-	-- element holder
-	local elements = library:create("Frame", {
-		Parent = panel,
-		Position = dim2(0, 0, 0, 22),
-		Size = dim2(1, 0, 0, 0),
-		AutomaticSize = Enum.AutomaticSize.Y,
-		BackgroundTransparency = 1,
-	})
-
-	library:padding(elements, 8, 8, 2, 10)
-	library:list(elements, 5)
-
-	cfg.holder = elements
-	cfg.panel = panel
-	cfg.current_row = nil
-
-	return setmetatable(cfg, library)
-end
-
---// toggle
-function library:toggle(properties)
-	local cfg = {
-		name = properties.name or properties.Name or "toggle",
-		flag = properties.flag or properties.Flag or tostring(math.random(1000000, 9999999)),
-		default = properties.default or properties.Default or false,
-		callback = properties.callback or properties.Callback or function() end,
-		tooltip = properties.tooltip or properties.Tooltip,
-		section = self,
-		right_count = 0,
-	}
-
-	local section = self
-
-	-- row
-	local row = library:create("TextButton", {
-		Parent = section.holder,
-		Size = dim2(1, 0, 0, 16),
-		BackgroundTransparency = 1,
-		Text = "",
-		AutoButtonColor = false,
-	})
-
-	-- checkbox
-	local checkbox = library:create("Frame", {
-		Parent = row,
-		Size = dim2(0, 11, 0, 11),
-		Position = dim2(0, 0, 0.5, -5.5),
-		BackgroundColor3 = library.theme.outline,
-		BorderSizePixel = 0,
-	})
-
-	library:corner(checkbox, 3)
-
-	local checkbox_stroke = library:stroke(checkbox, library.theme.inline, 1)
-	register_theme(checkbox_stroke, "inline", "Color")
-
-	local fill = library:create("Frame", {
-		Parent = checkbox,
-		Position = dim2(0, 2, 0, 2),
-		Size = dim2(1, -4, 1, -4),
-		BackgroundColor3 = library.theme.slider_fill,
-		BackgroundTransparency = 1,
-		BorderSizePixel = 0,
-	})
-
-	library:corner(fill, 2)
-	register_theme(fill, "slider_fill", "BackgroundColor3")
-
-	-- label
-	local label = library:create("TextLabel", {
-		Parent = row,
-		Font = library.font,
-		Text = cfg.name,
-		TextSize = library.text_size,
-		TextColor3 = library.theme.muted_text,
-		TextXAlignment = Enum.TextXAlignment.Left,
-		Position = dim2(0, 18, 0, 0),
-		Size = dim2(1, -24, 1, 0),
-		BackgroundTransparency = 1,
-	})
-
-	register_theme(label, "muted_text", "TextColor3")
-
-	-- right components (colorpickers / keybinds attach here)
-	local right_components = library:create("Frame", {
-		Parent = row,
-		Position = dim2(1, -2, 0, 0),
-		Size = dim2(0, 0, 1, 0),
-		BackgroundTransparency = 1,
-	})
-
-	library:list(right_components, 4, Enum.FillDirection.Horizontal, Enum.HorizontalAlignment.Right)
-
-	cfg.row = row
-	cfg.checkbox = checkbox
-	cfg.fill = fill
-	cfg.label = label
-	cfg.right_components = right_components
-
-	function cfg.set(state, silent)
-		cfg.state = state and true or false
-
-		fill.BackgroundTransparency = cfg.state and 0 or 1
-		label.TextColor3 = cfg.state and library.theme.text or library.theme.muted_text
-		checkbox_stroke.Transparency = cfg.state and 0.35 or 0
-
-		library.flags[cfg.flag] = cfg.state
-
-		if not silent then
-			cfg.callback(cfg.state)
-		end
-	end
-
-	row.MouseButton1Click:Connect(function()
-		cfg.set(not cfg.state)
-	end)
-
-	row.MouseEnter:Connect(function()
-		if not cfg.state then
-			library:tween(label, 0.12, { TextColor3 = library.theme.text })
-		end
-	end)
-
-	row.MouseLeave:Connect(function()
-		if not cfg.state then
-			library:tween(label, 0.12, { TextColor3 = library.theme.muted_text })
-		end
-	end)
-
-	if properties.tooltip or properties.Tooltip then
-		library:hover_tooltip(row, properties.tooltip or properties.Tooltip)
-	end
-
-	cfg.set(cfg.default, true)
-
-	library.config_flags[cfg.flag] = function(value)
-		cfg.set(value, true)
-		cfg.callback(value)
-	end
-
-	-- chained colorpicker
-	function cfg.colorpicker(properties_override)
-		local properties = properties_override or {}
-
-		properties.parent_holder = right_components
-		properties.inline = true
-		properties.section = section
-
-		return library:colorpicker(properties)
-	end
-
-	cfg.color_picker = cfg.colorpicker
-
-	-- chained keybind
-	function cfg.keybind(properties_override)
-		local properties = properties_override or {}
-
-		properties.chained = true
-		properties.section = section
-		properties.parent_holder = right_components
-
-		return library:keybind(properties)
-	end
-
-	return setmetatable(cfg, library)
-end
-
---// slider (toilet style: label left, value right, thin light-gray fill)
-function library:slider(properties)
-	local cfg = {
-		name = properties.name or properties.Name or "slider",
-		flag = properties.flag or properties.Flag or tostring(math.random(1000000, 9999999)),
-		default = properties.default or properties.Default,
-		min = properties.min or properties.Minimum or 0,
-		max = properties.max or properties.Maximum or 100,
-		step = properties.step or properties.increment or properties.interval or 1,
-		suffix = properties.suffix or properties.Suffix or "",
-		decimals = properties.decimals or properties.Decimals,
-		custom = properties.custom or properties.Custom or nil,
-		callback = properties.callback or properties.Callback or function() end,
-		tooltip = properties.tooltip or properties.Tooltip,
-		section = self,
-		dragging = false,
-	}
-
-	if cfg.default == nil then
-		cfg.default = cfg.min
-	end
-
-	local section = self
-
-	-- outer
-	local outer = library:create("Frame", {
-		Parent = section.holder,
-		Size = dim2(1, 0, 0, 26),
-		BackgroundTransparency = 1,
-	})
-
-	-- label row: name left, value right
-	local label = library:create("TextLabel", {
-		Parent = outer,
-		Font = library.font,
-		Text = cfg.name,
-		TextSize = library.text_size,
-		TextColor3 = library.theme.muted_text,
-		TextXAlignment = Enum.TextXAlignment.Left,
-		Position = dim2(0, 0, 0, 0),
-		Size = dim2(1, 0, 0, 13),
-		BackgroundTransparency = 1,
-	})
-
-	register_theme(label, "muted_text", "TextColor3")
-
-	local value_label = library:create("TextLabel", {
-		Parent = outer,
-		Font = library.font,
-		Text = "",
-		TextSize = library.text_size,
-		TextColor3 = library.theme.muted_text,
-		TextXAlignment = Enum.TextXAlignment.Right,
-		Position = dim2(0, 0, 0, 0),
-		Size = dim2(1, 0, 0, 13),
-		BackgroundTransparency = 1,
-	})
-
-	register_theme(value_label, "muted_text", "TextColor3")
-
-	-- track
-	local track = library:create("TextButton", {
-		Parent = outer,
-		Position = dim2(0, 0, 0, 18),
-		Size = dim2(1, 0, 0, 6),
-		BackgroundColor3 = library.theme.outline,
-		BorderSizePixel = 0,
-		Text = "",
-		AutoButtonColor = false,
-	})
-
-	library:corner(track, 3)
-	register_theme(track, "outline", "BackgroundColor3")
-
-	local track_stroke = library:stroke(track, library.theme.inline, 1)
-	track_stroke.Transparency = 0.5
-	register_theme(track_stroke, "inline", "Color")
-
-	local progress = library:create("Frame", {
-		Parent = track,
-		Size = dim2(0, 0, 1, 0),
-		BackgroundColor3 = library.theme.slider_fill,
-		BorderSizePixel = 0,
-	})
-
-	library:corner(progress, 3)
-	register_theme(progress, "slider_fill", "BackgroundColor3")
-
-	local knob = library:create("Frame", {
-		Parent = progress,
-		AnchorPoint = vec2(1, 0.5),
-		Position = dim2(1, 0, 0.5, 0),
-		Size = dim2(0, 2, 0, 8),
-		BackgroundColor3 = library.theme.text,
-		BorderSizePixel = 0,
-	})
-
-	library:corner(knob, 1)
-	register_theme(knob, "text", "BackgroundColor3")
-
-	cfg.track = track
-	cfg.progress = progress
-	cfg.label = label
-	cfg.value_label = value_label
-
-	local function format_value(value)
-		local text = tostring(cfg.custom and cfg.custom[tostring(value)] or value)
-
-		if cfg.decimals then
-			text = string.format("%." .. cfg.decimals .. "f", cfg.value)
-			text = tostring(cfg.custom and cfg.custom[text] or text)
-		end
-
-		return text .. cfg.suffix
-	end
-
-	function cfg.set(value, silent)
-		if type(value) ~= "number" then
-			return
-		end
-
-		cfg.value = clamp(library:round(value, cfg.step), cfg.min, cfg.max)
-
-		local alpha = (cfg.value - cfg.min) / (cfg.max - cfg.min)
-		progress.Size = dim2(alpha, 0, 1, 0)
-		value_label.Text = format_value(cfg.value)
-
-		library.flags[cfg.flag] = cfg.value
-
-		if not silent then
-			cfg.callback(cfg.value)
-		end
-	end
-
-	track.MouseButton1Down:Connect(function()
-		cfg.dragging = true
-		value_label.TextColor3 = library.theme.text
-
-		local size_x = clamp((get_mouse().X - track.AbsolutePosition.X) / track.AbsoluteSize.X, 0, 1)
-		cfg.set(((cfg.max - cfg.min) * size_x) + cfg.min)
-	end)
-
-	library:connection(uis.InputEnded, function(input)
-		if input.UserInputType == Enum.UserInputType.MouseButton1 then
-			cfg.dragging = false
-			value_label.TextColor3 = library.theme.muted_text
-		end
-	end)
-
-	library:connection(uis.InputChanged, function(input)
-		if cfg.dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
-			local size_x = clamp((input.Position.X - track.AbsolutePosition.X) / track.AbsoluteSize.X, 0, 1)
-			cfg.set(((cfg.max - cfg.min) * size_x) + cfg.min)
-		end
-	end)
-
-	-- fine tune with mouse wheel while hovering
-	track.MouseEnter:Connect(function()
-		cfg.mouse_over = true
-	end)
-
-	track.MouseLeave:Connect(function()
-		cfg.mouse_over = false
-	end)
-
-	library:connection(uis.InputChanged, function(input)
-		if cfg.mouse_over and input.UserInputType == Enum.UserInputType.MouseWheel then
-			cfg.set(cfg.value + (input.Position.Z > 0 and cfg.step or -cfg.step))
-		end
-	end)
-
-	if properties.tooltip or properties.Tooltip then
-		library:hover_tooltip(outer, properties.tooltip or properties.Tooltip)
-	end
-
-	cfg.set(cfg.default, true)
-
-	library.config_flags[cfg.flag] = function(value)
-		cfg.set(value, true)
-		cfg.callback(value)
-	end
-
-	return setmetatable(cfg, library)
-end
-
---// dropdown (toilet style: label above, box with "...", list drops below)
-function library:dropdown(properties)
-	local cfg = {
-		name = properties.name or properties.Name,
-		flag = properties.flag or properties.Flag or tostring(math.random(1000000, 9999999)),
-		items = properties.items or properties.Options or { "option 1", "option 2", "option 3" },
-		multi = properties.multi or properties.Multi or false,
-		callback = properties.callback or properties.Callback or function() end,
-		tooltip = properties.tooltip or properties.Tooltip,
-		section = self,
-		open = false,
-		option_instances = {},
-		selected = {},
-	}
-
-	local section = self
-	cfg.default = properties.default or properties.Default or (cfg.multi and {} or cfg.items[1])
-
-	-- outer + label
-	local outer = library:create("Frame", {
-		Parent = section.holder,
-		Size = dim2(1, 0, 0, cfg.name and 32 or 20),
-		AutomaticSize = Enum.AutomaticSize.Y,
-		BackgroundTransparency = 1,
-	})
-
-	if cfg.name then
-		local label = library:create("TextLabel", {
-			Parent = outer,
-			Font = library.font,
-			Text = cfg.name,
-			TextSize = library.text_size,
-			TextColor3 = library.theme.muted_text,
-			TextXAlignment = Enum.TextXAlignment.Left,
-			Size = dim2(1, 0, 0, 13),
-			BackgroundTransparency = 1,
-		})
-
-		register_theme(label, "muted_text", "TextColor3")
-	end
-
-	-- dropdown box
-	local box = library:create("TextButton", {
-		Parent = outer,
-		Position = cfg.name and dim2(0, 0, 0, 16) or dim2(0, 0, 0, 2),
-		Size = dim2(1, 0, 0, 18),
-		BackgroundColor3 = library.theme.element,
-		BorderSizePixel = 0,
-		Text = "",
-		AutoButtonColor = false,
-		ClipsDescendants = true,
-	})
-
-	library:corner(box, 4)
-	register_theme(box, "element", "BackgroundColor3")
-
-	local box_stroke = library:stroke(box, library.theme.outline, 1)
-	register_theme(box_stroke, "outline", "Color")
-
-	local box_label = library:create("TextLabel", {
-		Parent = box,
-		Font = library.font,
-		Text = "",
-		TextSize = library.text_size,
-		TextColor3 = library.theme.text,
-		TextXAlignment = Enum.TextXAlignment.Left,
-		TextTruncate = Enum.TextTruncate.AtEnd,
-		Position = dim2(0, 8, 0, 0),
-		Size = dim2(1, -30, 1, 0),
-		BackgroundTransparency = 1,
-	})
-
-	register_theme(box_label, "text", "TextColor3")
-
-	local box_icon = library:create("TextLabel", {
-		Parent = box,
-		Font = library.font,
-		Text = "...",
-		TextSize = library.text_size,
-		TextColor3 = library.theme.muted_text,
-		TextXAlignment = Enum.TextXAlignment.Right,
-		Position = dim2(1, -22, 0, 0),
-		Size = dim2(0, 14, 1, 0),
-		BackgroundTransparency = 1,
-	})
-
-	register_theme(box_icon, "muted_text", "TextColor3")
-
-	-- list window (floats under the box)
-	local window = library:create("Frame", {
-		Parent = library.gui,
-		Visible = false,
-		ZIndex = 120,
-		Size = dim2(0, 0, 0, 0),
-		AutomaticSize = Enum.AutomaticSize.Y,
-		BackgroundColor3 = library.theme.element,
-		BorderSizePixel = 0,
-	})
-
-	library:corner(window, 4)
-	library:stroke(window, library.theme.outline, 1)
-	register_theme(window, "element", "BackgroundColor3")
-
-	local options = library:create("ScrollingFrame", {
-		Parent = window,
-		BackgroundTransparency = 1,
-		BorderSizePixel = 0,
-		ZIndex = 121,
-		Size = dim2(1, 0, 0, 0),
-		AutomaticCanvasSize = Enum.AutomaticSize.Y,
-		CanvasSize = dim2(0, 0, 0, 0),
-		ScrollBarThickness = 1,
-		ScrollBarImageColor3 = library.theme.inline,
-		ScrollingDirection = Enum.ScrollingDirection.Y,
-	})
-
-	library:padding(options, 2, 2, 2, 2)
-	library:list(options, 1)
-
-	cfg.window = window
-	cfg.trigger = box
-	cfg.box = box
-	cfg.box_label = box_label
-
-	local function update_size()
-		window.Size = dim2(0, box.AbsoluteSize.X, 0, 0)
-
-		local height = math.min(#cfg.option_instances * 17 + 4, 17 * 8)
-		options.Size = dim2(1, 0, 0, height)
-
-		local position = box.AbsolutePosition
-		local viewport = camera.ViewportSize
-
-		local y = position.Y + box.AbsoluteSize.Y + 4
-		if y + height > viewport.Y then
-			y = position.Y - height - 4
-		end
-
-		window.Position = dim2(0, position.X, 0, y)
-	end
-
-	function cfg.set_visible(state)
-		cfg.open = state
-
-		if state then
-			update_size()
-		end
-
-		window.Visible = state
-		box_icon.Text = state and "x" or "..."
-		box_stroke.Color = state and library.theme.accent or library.theme.outline
-
-		if state then
-			if library.current_element_open and library.current_element_open ~= cfg then
-				library.current_element_open.set_visible(false)
-				library.current_element_open.open = false
-			end
-
-			library.current_element_open = cfg
-		elseif library.current_element_open == cfg then
-			library.current_element_open = nil
-		end
-	end
-
-	function cfg.set(value, silent)
-		local selected = {}
-		local is_table = type(value) == "table"
-
-		for _, option in next, cfg.option_instances do
-			if option.Text == value or (is_table and find(value, option.Text)) then
-				option.TextColor3 = library.theme.accent
-				insert(selected, option.Text)
-			else
-				option.TextColor3 = library.theme.muted_text
-			end
-		end
-
-		cfg.selected = selected
-		box_label.Text = is_table and ((#selected > 0) and table.concat(selected, ", ") or "--") or selected[1] or "--"
-
-		library.flags[cfg.flag] = is_table and selected or selected[1]
-
-		if not silent then
-			cfg.callback(library.flags[cfg.flag])
-		end
-	end
-
-	function cfg:refresh_options(items)
-		cfg.items = items or cfg.items
-
-		for _, option in next, cfg.option_instances do
-			option:Destroy()
-		end
-
-		cfg.option_instances = {}
-
-		for _, item in next, cfg.items do
-			local option = library:create("TextButton", {
-				Parent = options,
-				Font = library.font,
-				Text = item,
-				TextSize = library.text_size,
-				TextColor3 = library.theme.muted_text,
-				TextXAlignment = Enum.TextXAlignment.Left,
-				Size = dim2(1, 0, 0, 16),
-				BackgroundColor3 = library.theme.element,
-				BackgroundTransparency = 1,
-				BorderSizePixel = 0,
-				AutoButtonColor = false,
-				ZIndex = 122,
-			})
-
-			library:padding(option, 6, 6, 0, 0)
-			insert(cfg.option_instances, option)
-
-			option.MouseEnter:Connect(function()
-				library:tween(option, 0.1, { TextColor3 = library.theme.text })
-			end)
-
-			option.MouseLeave:Connect(function()
-				local is_selected = find(cfg.selected, item) ~= nil
-				library:tween(option, 0.1, {
-					TextColor3 = is_selected and library.theme.accent or library.theme.muted_text,
-				})
-			end)
-
-			option.MouseButton1Down:Connect(function()
-				if cfg.multi then
-					local index = find(cfg.selected, item)
-
-					if index then
-						remove(cfg.selected, index)
-					else
-						insert(cfg.selected, item)
-					end
-
-					cfg.set(cfg.selected)
-				else
-					cfg.set_visible(false)
-					cfg.open = false
-					cfg.set(item)
-				end
-			end)
-		end
-
-		cfg.set(cfg.default, true)
-	end
-
-	box.MouseButton1Click:Connect(function()
-		cfg.open = not cfg.open
-		cfg.set_visible(cfg.open)
-	end)
-
-	if properties.tooltip or properties.Tooltip then
-		library:hover_tooltip(box, properties.tooltip or properties.Tooltip)
-	end
-
-	cfg:refresh_options(cfg.items)
-
-	library.config_flags[cfg.flag] = function(value)
-		cfg.set(value, true)
-		cfg.callback(value)
-	end
-
-
-	return setmetatable(cfg, library)
-end
-
---// colorpicker (indigo swatches, compact hsv window)
-function library:colorpicker(properties)
-	local cfg = {
-		name = properties.name or properties.Name,
-		flag = properties.flag or properties.Flag or tostring(math.random(1000000, 9999999)),
-		color = properties.color or properties.Color or library.theme.accent,
-		transparency = properties.transparency or properties.Transparency or properties.alpha or 0,
-		callback = properties.callback or properties.Callback or function() end,
-		tooltip = properties.tooltip or properties.Tooltip,
-		inline = properties.inline or false,
-		open = false,
-	}
-
-	local section = properties.section or self
-	local parent_holder = properties.parent_holder or section.holder
-
-	local outer
-
-	if cfg.inline then
-		outer = parent_holder
-	else
-		outer = library:create("Frame", {
-			Parent = section.holder,
-			Size = dim2(1, 0, 0, cfg.name and 18 or 12),
-			BackgroundTransparency = 1,
-		})
-
-		if cfg.name then
-			local label = library:create("TextLabel", {
-				Parent = outer,
-				Font = library.font,
-				Text = cfg.name,
-				TextSize = library.text_size,
-				TextColor3 = library.theme.muted_text,
-				TextXAlignment = Enum.TextXAlignment.Left,
-				Size = dim2(1, -30, 1, 0),
-				Position = dim2(0, 0, 0, 0),
-				BackgroundTransparency = 1,
-			})
-
-			register_theme(label, "muted_text", "TextColor3")
-		end
-	end
-
-	-- swatch (the little indigo square from the reference ui)
-	local swatch_inline = library:create("TextButton", {
-		Parent = outer,
-		AnchorPoint = cfg.inline and vec2(0, 0.5) or vec2(1, 0.5),
-		Position = cfg.inline and dim2(0, 0, 0.5, 0) or dim2(1, 0, 0.5, 0),
-		Size = dim2(0, 20, 0, 10),
-		BackgroundColor3 = cfg.color,
-		BorderSizePixel = 0,
-		Text = "",
-		AutoButtonColor = false,
-		ZIndex = 3,
-	})
-
-	library:corner(swatch_inline, 3)
-
-	local swatch_stroke = library:stroke(swatch_inline, library.theme.outline, 1)
-	register_theme(swatch_stroke, "outline", "Color")
-
-	local swatch = library:create("Frame", {
-		Parent = swatch_inline,
-		Position = dim2(0, 1, 0, 1),
-		Size = dim2(1, -2, 1, -2),
-		BackgroundColor3 = cfg.color,
-		BorderSizePixel = 0,
-		ZIndex = 4,
-	})
-
-	library:corner(swatch, 2)
-
-	-- hsv window
-	local window = library:create("Frame", {
-		Parent = library.gui,
-		Visible = false,
-		ZIndex = 130,
-		Size = dim2(0, 158, 0, 208),
-		BackgroundColor3 = library.theme.element,
-		BorderSizePixel = 0,
-	})
-
-	library:corner(window, 5)
-	library:stroke(window, library.theme.outline, 1)
-	register_theme(window, "element", "BackgroundColor3")
-
-	local window_header = library:create("TextButton", {
-		Parent = window,
-		Size = dim2(1, 0, 0, 14),
-		BackgroundTransparency = 1,
-		Text = "",
-		AutoButtonColor = false,
-		ZIndex = 131,
-	})
-
-	local window_label = library:create("TextLabel", {
-		Parent = window_header,
-		Font = library.font,
-		Text = cfg.name or "colorpicker",
-		TextSize = library.text_size,
-		TextColor3 = library.theme.muted_text,
-		BackgroundTransparency = 1,
-		Position = dim2(0, 8, 0, 0),
-		Size = dim2(1, -16, 1, 0),
-		TextXAlignment = Enum.TextXAlignment.Left,
-		TextTruncate = Enum.TextTruncate.AtEnd,
-		ZIndex = 132,
-	})
-
-	register_theme(window_label, "muted_text", "TextColor3")
-
-	-- saturation / value palette
-	local palette = library:create("TextButton", {
-		Parent = window,
-		Position = dim2(0, 7, 0, 20),
-		Size = dim2(1, -14, 0, 110),
-		BackgroundColor3 = hsv(0, 1, 1),
-		BorderSizePixel = 0,
-		Text = "",
-		AutoButtonColor = false,
-		ZIndex = 131,
-	})
-
-	library:corner(palette, 3)
-
-	local white_overlay = library:create("Frame", {
-		Parent = palette,
-		Size = dim2(1, 0, 1, 0),
-		BackgroundColor3 = rgb(255, 255, 255),
-		BorderSizePixel = 0,
-		ZIndex = 132,
-	})
-
-	library:create("UIGradient", {
-		Parent = white_overlay,
-		ZIndex = 133,
-		Transparency = NumberSequence.new({
-			NumberSequenceKeypoint.new(0, 0),
-			NumberSequenceKeypoint.new(1, 1),
-		}),
-	})
-
-	local black_overlay = library:create("Frame", {
-		Parent = palette,
-		Size = dim2(1, 0, 1, 0),
-		BackgroundColor3 = rgb(0, 0, 0),
-		BorderSizePixel = 0,
-		ZIndex = 133,
-	})
-
-	library:create("UIGradient", {
-		Parent = black_overlay,
-		Rotation = 270,
-		ZIndex = 134,
-		Transparency = NumberSequence.new({
-			NumberSequenceKeypoint.new(0, 1),
-			NumberSequenceKeypoint.new(1, 0),
-		}),
-	})
-
-	local palette_cursor = library:create("Frame", {
-		Parent = palette,
-		AnchorPoint = vec2(0.5, 0.5),
-		Size = dim2(0, 6, 0, 6),
-		BackgroundColor3 = rgb(255, 255, 255),
-		BorderSizePixel = 0,
-		ZIndex = 135,
-	})
-
-	library:corner(palette_cursor, 3)
-	library:stroke(palette_cursor, rgb(0, 0, 0), 1)
-
-	-- hue bar
-	local hue_bar = library:create("TextButton", {
-		Parent = window,
-		Position = dim2(0, 7, 0, 138),
-		Size = dim2(1, -14, 0, 10),
-		BackgroundColor3 = rgb(255, 255, 255),
-		BorderSizePixel = 0,
-		Text = "",
-		AutoButtonColor = false,
-		ZIndex = 131,
-	})
-
-	library:corner(hue_bar, 3)
-
-	library:create("UIGradient", {
-		Parent = hue_bar,
-		ZIndex = 132,
-		Color = ColorSequence.new({
-			ColorSequenceKeypoint.new(0, rgb(255, 0, 0)),
-			ColorSequenceKeypoint.new(0.17, rgb(255, 255, 0)),
-			ColorSequenceKeypoint.new(0.33, rgb(0, 255, 0)),
-			ColorSequenceKeypoint.new(0.5, rgb(0, 255, 255)),
-			ColorSequenceKeypoint.new(0.66, rgb(0, 0, 255)),
-			ColorSequenceKeypoint.new(0.83, rgb(255, 0, 255)),
-			ColorSequenceKeypoint.new(1, rgb(255, 0, 0)),
-		}),
-	})
-
-	local hue_cursor = library:create("Frame", {
-		Parent = hue_bar,
-		AnchorPoint = vec2(0.5, 0.5),
-		Position = dim2(0, 0, 0.5, 0),
-		Size = dim2(0, 3, 0, 14),
-		BackgroundColor3 = rgb(255, 255, 255),
-		BorderSizePixel = 0,
-		ZIndex = 135,
-	})
-
-	library:corner(hue_cursor, 1)
-	library:stroke(hue_cursor, rgb(0, 0, 0), 1)
-
-	-- alpha bar
-	local alpha_bar = library:create("TextButton", {
-		Parent = window,
-		Position = dim2(0, 7, 0, 156),
-		Size = dim2(1, -14, 0, 10),
-		BackgroundColor3 = cfg.color,
-		BorderSizePixel = 0,
-		Text = "",
-		AutoButtonColor = false,
-		ZIndex = 131,
-	})
-
-	library:corner(alpha_bar, 3)
-
-	local alpha_gradient = library:create("UIGradient", {
-		Parent = alpha_bar,
-		ZIndex = 132,
-		Transparency = NumberSequence.new({
-			NumberSequenceKeypoint.new(0, 1),
-			NumberSequenceKeypoint.new(1, 0),
-		}),
-	})
-
-	local alpha_cursor = library:create("Frame", {
-		Parent = alpha_bar,
-		AnchorPoint = vec2(0.5, 0.5),
-		Position = dim2(1, 0, 0.5, 0),
-		Size = dim2(0, 3, 0, 14),
-		BackgroundColor3 = rgb(255, 255, 255),
-		BorderSizePixel = 0,
-		ZIndex = 135,
-	})
-
-	library:corner(alpha_cursor, 1)
-	library:stroke(alpha_cursor, rgb(0, 0, 0), 1)
-
-	-- hex preview
-	local hex_label = library:create("TextLabel", {
-		Parent = window,
-		Font = library.font,
-		Text = "#56 56 ff",
-		TextSize = library.text_size,
-		TextColor3 = library.theme.muted_text,
-		BackgroundTransparency = 1,
-		Position = dim2(0, 8, 1, -16),
-		Size = dim2(1, -16, 0, 12),
-		TextXAlignment = Enum.TextXAlignment.Left,
-		ZIndex = 131,
-	})
-
-	register_theme(hex_label, "muted_text", "TextColor3")
-
-
-	cfg.window = window
-	cfg.trigger = swatch_inline
-	cfg.section = section
-	cfg.parent_holder = properties.parent_holder
-
-	-- chain a keybind after this colorpicker (e.g. toggle:colorpicker():keybind())
-	function cfg.keybind(properties_override)
-		local chained_properties = properties_override or {}
-
-		chained_properties.chained = true
-		chained_properties.section = section
-		chained_properties.parent_holder = cfg.parent_holder
-
-		return library:keybind(chained_properties)
-	end
-
-	-- hsv state from the default color
-	local h, s, v = cfg.color:ToHSV()
-	cfg.hue, cfg.saturation, cfg.value = h, s, v
-
-	local function update()
-		cfg.color = hsv(cfg.hue, cfg.saturation, cfg.value)
-
-		swatch.BackgroundColor3 = cfg.color
-		swatch.BackgroundTransparency = cfg.transparency
-		palette.BackgroundColor3 = hsv(cfg.hue, 1, 1)
-		alpha_bar.BackgroundColor3 = cfg.color
-
-		palette_cursor.Position = dim2(cfg.saturation, 0, 1 - cfg.value, 0)
-		hue_cursor.Position = dim2(cfg.hue, 0, 0.5, 0)
-		alpha_cursor.Position = dim2(1 - cfg.transparency, 0, 0.5, 0)
-
-		alpha_gradient.Color = ColorSequence.new({
-			ColorSequenceKeypoint.new(0, cfg.color),
-			ColorSequenceKeypoint.new(1, cfg.color),
-		})
-
-		local red, green, blue = floor(cfg.color.R * 255), floor(cfg.color.G * 255), floor(cfg.color.B * 255)
-		hex_label.Text = string.format("#%02x%02x%02x %.2f", red, green, blue, 1 - cfg.transparency)
-
-		library.flags[cfg.flag] = {
-			Color = cfg.color,
-			Hex = cfg.color:ToHex(),
-			Transparency = cfg.transparency,
-		}
-	end
-
-	function cfg.set(color, transparency, silent)
-		if type(color) == "table" and color.Color then
-			cfg.transparency = color.Transparency or 0
-			color = color.Color
-		end
-
-		if type(color) == "string" then
-			color = hex(color)
-		end
-
-		cfg.hue, cfg.saturation, cfg.value = color:ToHSV()
-		cfg.transparency = clamp(tonumber(cfg.transparency) or 0, 0, 1)
-
-		update()
-
-		if not silent then
-			cfg.callback(cfg.color, cfg.transparency)
-		end
-	end
-
-	function cfg.set_visible(state)
-		cfg.open = state
-
-		if state then
-			local position = swatch_inline.AbsolutePosition
-			local viewport = camera.ViewportSize
-			local x = clamp(position.X + swatch_inline.AbsoluteSize.X + 6, 4, viewport.X - window.Size.X.Offset - 6)
-			local y = clamp(position.Y + 16, 0, viewport.Y - window.Size.Y.Offset - 6)
-
-			window.Position = dim2(0, x, 0, y)
-
-			if library.current_element_open and library.current_element_open ~= cfg then
-				library.current_element_open.set_visible(false)
-				library.current_element_open.open = false
-			end
-
-			library.current_element_open = cfg
-		elseif library.current_element_open == cfg then
-			library.current_element_open = nil
-		end
-
-		window.Visible = state
-	end
-
-	swatch_inline.MouseButton1Click:Connect(function()
-		cfg.set_visible(not cfg.open)
-	end)
-
-	-- copy / paste (right click copies, middle click pastes)
-	swatch_inline.MouseButton2Click:Connect(function()
-		library.copied_color = cfg.color
-		library:notification({ text = "copied color", time = 2 })
-	end)
-
-	swatch_inline.InputBegan:Connect(function(input)
-		if input.UserInputType == Enum.UserInputType.MouseButton3 and library.copied_color then
-			cfg.set(library.copied_color)
-		end
-	end)
-
-	-- dragging helpers
-	local drag_target = nil
-
-	local function palette_input()
-		local position = palette.AbsolutePosition
-		local size = palette.AbsoluteSize
-		local mouse_position = get_mouse()
-
-		cfg.saturation = clamp((mouse_position.X - position.X) / size.X, 0, 1)
-		cfg.value = clamp(1 - (mouse_position.Y - position.Y) / size.Y, 0, 1)
-
-		update()
-		cfg.callback(cfg.color, cfg.transparency)
-	end
-
-	local function hue_input()
-		local position = hue_bar.AbsolutePosition
-		local mouse_position = get_mouse()
-
-		cfg.hue = clamp((mouse_position.X - position.X) / hue_bar.AbsoluteSize.X, 0, 1)
-
-		update()
-		cfg.callback(cfg.color, cfg.transparency)
-	end
-
-	local function alpha_input()
-		local position = alpha_bar.AbsolutePosition
-		local mouse_position = get_mouse()
-
-		cfg.transparency = clamp(1 - (mouse_position.X - position.X) / alpha_bar.AbsoluteSize.X, 0, 1)
-
-		update()
-		cfg.callback(cfg.color, cfg.transparency)
-	end
-
-	palette.InputBegan:Connect(function(input)
-		if input.UserInputType == Enum.UserInputType.MouseButton1 then
-			drag_target = "palette"
-			palette_input()
-		end
-	end)
-
-	hue_bar.InputBegan:Connect(function(input)
-		if input.UserInputType == Enum.UserInputType.MouseButton1 then
-			drag_target = "hue"
-			hue_input()
-		end
-	end)
-
-	alpha_bar.InputBegan:Connect(function(input)
-		if input.UserInputType == Enum.UserInputType.MouseButton1 then
-			drag_target = "alpha"
-			alpha_input()
-		end
-	end)
-
-	library:connection(uis.InputChanged, function(input)
-		if drag_target and input.UserInputType == Enum.UserInputType.MouseMovement then
-			if drag_target == "palette" then
-				palette_input()
-			elseif drag_target == "hue" then
-				hue_input()
-			elseif drag_target == "alpha" then
-				alpha_input()
-			end
-		end
-	end)
-
-	library:connection(uis.InputEnded, function(input)
-		if input.UserInputType == Enum.UserInputType.MouseButton1 then
-			drag_target = nil
-		end
-	end)
-
-	-- draggable window
-	local dragging, drag_start, start_position
-
-	window_header.InputBegan:Connect(function(input)
-		if input.UserInputType == Enum.UserInputType.MouseButton1 then
-			dragging = true
-			drag_start = input.Position
-			start_position = window.Position
-		end
-	end)
-
-	library:connection(uis.InputEnded, function(input)
-		if input.UserInputType == Enum.UserInputType.MouseButton1 then
-			dragging = false
-		end
-	end)
-
-	library:connection(uis.InputChanged, function(input)
-		if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
-			local delta = input.Position - drag_start
-			window.Position = dim2(0, start_position.X.Offset + delta.X, 0, start_position.Y.Offset + delta.Y)
-		end
-	end)
-
-	if properties.tooltip or properties.Tooltip then
-		library:hover_tooltip(swatch_inline, properties.tooltip or properties.Tooltip)
-	end
-
-	cfg.set(cfg.color, cfg.transparency, true)
-	cfg.callback(cfg.color, cfg.transparency)
-
-	library.config_flags[cfg.flag] = function(value, transparency)
-		if type(value) == "table" and value.Color then
-			cfg.transparency = value.Transparency or transparency or 0
-			value = value.Color
-		elseif transparency ~= nil then
-			cfg.transparency = transparency
-		end
-
-		cfg.set(value, cfg.transparency, true)
-		cfg.callback(cfg.color, cfg.transparency)
-	end
-
-
-	return setmetatable(cfg, library)
-end
-
---// button (toilet style: gray rounded, full / half / third widths in rows)
-function library:button(properties)
-	local cfg = {
-		name = properties.name or properties.text or properties.Name or "Button",
-		callback = properties.callback or properties.Callback or function() end,
-		tooltip = properties.tooltip or properties.Tooltip,
-		section = self,
-	}
-
-	local section = self
-	local fraction = properties.size or properties.Size or 1
-
-	local holder
-
-	if fraction < 1 then
-		local row = section.current_row
-
-		if not row or row.remaining < fraction then
-			row = library:create("Frame", {
-				Parent = section.holder,
-				Size = dim2(1, 0, 0, 18),
-				BackgroundTransparency = 1,
-			})
-
-			library:list(row, 3, Enum.FillDirection.Horizontal, Enum.HorizontalAlignment.Left)
-			section.current_row = { frame = row, remaining = 1 }
-		end
-
-		holder = row.frame
-		section.current_row.remaining = section.current_row.remaining - fraction
-	else
-		section.current_row = nil
-
-		holder = library:create("Frame", {
-			Parent = section.holder,
-			Size = dim2(1, 0, 0, 18),
-			BackgroundTransparency = 1,
-		})
-	end
-
-	local button = library:create("TextButton", {
-		Parent = holder,
-		Font = library.font,
-		Text = cfg.name,
-		TextSize = library.text_size,
-		TextColor3 = library.theme.text,
-		Size = dim2(fraction, fraction < 1 and -3 or 0, 1, 0),
-		BackgroundColor3 = library.theme.element,
-		BorderSizePixel = 0,
-		AutoButtonColor = false,
-		LayoutOrder = section.__button_order or 0,
-	})
-
-	section.__button_order = (section.__button_order or 0) + 1
-
-	library:corner(button, 4)
-	register_theme(button, "element", "BackgroundColor3")
-
-	local button_stroke = library:stroke(button, library.theme.outline, 1)
-	register_theme(button_stroke, "outline", "Color")
-
-	button.MouseEnter:Connect(function()
-		library:tween(button, 0.12, { BackgroundColor3 = library.theme.element_hover })
-	end)
-
-	button.MouseLeave:Connect(function()
-		library:tween(button, 0.12, { BackgroundColor3 = library.theme.element })
-		button_stroke.Color = library.theme.outline
-	end)
-
-	button.MouseButton1Down:Connect(function()
-		button_stroke.Color = library.theme.accent
-	end)
-
-	button.MouseButton1Click:Connect(function()
-		cfg.callback()
-	end)
-
-	if properties.tooltip or properties.Tooltip then
-		library:hover_tooltip(button, properties.tooltip or properties.Tooltip)
-	end
-
-	return setmetatable(cfg, library)
-end
-
---// textbox
-function library:textbox(properties)
-	local cfg = {
-		name = properties.name or properties.Name,
-		flag = properties.flag or properties.Flag or tostring(math.random(1000000, 9999999)),
-		placeholder = properties.placeholder or properties.Placeholder or properties.placeholdertext or "type here...",
-		default = properties.default or properties.Default,
-		clear_on_focus = properties.clear_on_focus or false,
-		callback = properties.callback or properties.Callback or function() end,
-		tooltip = properties.tooltip or properties.Tooltip,
-		section = self,
-	}
-
-	local section = self
-
-	local outer = library:create("Frame", {
-		Parent = section.holder,
-		Size = dim2(1, 0, 0, cfg.name and 32 or 20),
-		AutomaticSize = Enum.AutomaticSize.Y,
-		BackgroundTransparency = 1,
-	})
-
-	if cfg.name then
-		local label = library:create("TextLabel", {
-			Parent = outer,
-			Font = library.font,
-			Text = cfg.name,
-			TextSize = library.text_size,
-			TextColor3 = library.theme.muted_text,
-			TextXAlignment = Enum.TextXAlignment.Left,
-			Size = dim2(1, 0, 0, 13),
-			BackgroundTransparency = 1,
-		})
-
-		register_theme(label, "muted_text", "TextColor3")
-	end
-
-	local box = library:create("TextBox", {
-		Parent = outer,
-		Font = library.font,
-		Text = "",
-		TextSize = library.text_size,
-		TextColor3 = library.theme.text,
-		PlaceholderText = cfg.placeholder,
-		PlaceholderColor3 = library.theme.muted_text,
-		TextXAlignment = Enum.TextXAlignment.Left,
-		ClearTextOnFocus = cfg.clear_on_focus,
-		Position = cfg.name and dim2(0, 0, 0, 16) or dim2(0, 0, 0, 2),
-		Size = dim2(1, 0, 0, 18),
-		BackgroundColor3 = library.theme.element,
-		BorderSizePixel = 0,
-	})
-
-	library:corner(box, 4)
-	register_theme(box, "element", "BackgroundColor3")
-
-	local box_stroke = library:stroke(box, library.theme.outline, 1)
-	register_theme(box_stroke, "outline", "Color")
-
-	library:padding(box, 8, 8, 0, 0)
-
-	box.Focused:Connect(function()
-		library:tween(box_stroke, 0.12, { Color = library.theme.accent })
-	end)
-
-	box.FocusLost:Connect(function(enter_pressed)
-		library:tween(box_stroke, 0.12, { Color = library.theme.outline })
-
-		library.flags[cfg.flag] = box.Text
-		cfg.callback(box.Text, enter_pressed)
-	end)
-
-	function cfg.set(text, silent)
-		box.Text = text
-		library.flags[cfg.flag] = text
-
-		if not silent then
-			cfg.callback(text)
-		end
-	end
-
-	if cfg.default then
-		cfg.set(cfg.default, true)
-	end
-
-	if properties.tooltip or properties.Tooltip then
-		library:hover_tooltip(box, properties.tooltip or properties.Tooltip)
-	end
-
-	library.config_flags[cfg.flag] = function(value)
-		cfg.set(value, true)
-		cfg.callback(value)
-	end
-
-	return setmetatable(cfg, library)
-end
-
---// label
-function library:label(properties)
-	local cfg = {
-		name = properties.name or properties.text or properties.Name or "label",
-		section = self,
-	}
-
-	local section = self
-
-	local label = library:create("TextLabel", {
-		Parent = section.holder,
-		Font = library.font,
-		Text = cfg.name,
-		TextSize = library.text_size,
-		TextColor3 = properties.color or properties.Color or library.theme.text,
-		TextXAlignment = Enum.TextXAlignment.Left,
-		Size = dim2(1, 0, 0, 13),
-		BackgroundTransparency = 1,
-	})
-
-	register_theme(label, "text", "TextColor3")
-
-	cfg.label = label
-
-	function cfg.set(text)
-		label.Text = text
-	end
-
-	return setmetatable(cfg, library)
-end
-
---// divider
-function library:divider()
-	local section = self
-
-	local line = library:create("Frame", {
-		Parent = section.holder,
-		Size = dim2(1, 0, 0, 1),
-		BackgroundColor3 = library.theme.inline,
-		BackgroundTransparency = 0.55,
-		BorderSizePixel = 0,
-	})
-
-	register_theme(line, "inline", "BackgroundColor3")
-	return line
-end
-
---// listbox (rune style selection box: click an option to select it)
-function library:listbox(properties)
-	local cfg = {
-		flag = properties.flag or properties.Flag or tostring(math.random(1000000, 9999999)),
-		items = properties.items or properties.Options or {},
-		callback = properties.callback or properties.Callback or function() end,
-		tooltip = properties.tooltip or properties.Tooltip,
-		section = self,
-		option_instances = {},
-	}
-
-	local section = self
-	cfg.default = properties.default or properties.Default
-
-	local box = library:create("Frame", {
-		Parent = section.holder,
-		Size = dim2(1, 0, 0, #cfg.items * 15 + 8),
-		AutomaticSize = Enum.AutomaticSize.Y,
-		BackgroundColor3 = library.theme.outline,
-		BorderSizePixel = 0,
-	})
-
-	library:corner(box, 4)
-	register_theme(box, "outline", "BackgroundColor3")
-
-	local box_stroke = library:stroke(box, library.theme.inline, 1)
-	register_theme(box_stroke, "inline", "Color")
-
-	library:padding(box, 2, 2, 2, 2)
-	library:list(box, 2)
-
-	cfg.box = box
-
-	function cfg.set(value, silent)
-		for _, option in next, cfg.option_instances do
-			if option.Text == value then
-				library:tween(option, 0.12, { BackgroundColor3 = library.theme.element })
-				library:tween(option, 0.12, { TextColor3 = library.theme.accent })
-			else
-				library:tween(option, 0.12, { BackgroundColor3 = library.theme.outline })
-				library:tween(option, 0.12, { TextColor3 = library.theme.muted_text })
-			end
-		end
-
-		library.flags[cfg.flag] = value
-
-		if not silent then
-			cfg.callback(value)
-		end
-	end
-
-	for _, item in next, cfg.items do
-		local option = library:create("TextButton", {
-			Parent = box,
-			Font = library.font,
-			Text = item,
-			TextSize = library.text_size,
-			TextColor3 = library.theme.muted_text,
-			TextXAlignment = Enum.TextXAlignment.Left,
-			Size = dim2(1, 0, 0, 15),
-			BackgroundColor3 = library.theme.outline,
-			BorderSizePixel = 0,
-			AutoButtonColor = false,
-		})
-
-		library:padding(option, 6, 6, 0, 0)
-		insert(cfg.option_instances, option)
-
-		option.MouseEnter:Connect(function()
-			if library.flags[cfg.flag] ~= item then
-				library:tween(option, 0.1, { TextColor3 = library.theme.text })
-			end
-		end)
-
-		option.MouseLeave:Connect(function()
-			if library.flags[cfg.flag] ~= item then
-				library:tween(option, 0.1, { TextColor3 = library.theme.muted_text })
-			end
-		end)
-
-		option.MouseButton1Click:Connect(function()
-			cfg.set(item)
-		end)
-	end
-
-	if properties.tooltip or properties.Tooltip then
-		library:hover_tooltip(box, properties.tooltip or properties.Tooltip)
-	end
-
-	if cfg.default then
-		cfg.set(cfg.default, true)
-	end
-
-	library.config_flags[cfg.flag] = function(value)
-		cfg.set(value, true)
-		cfg.callback(value)
-	end
-
-	return setmetatable(cfg, library)
-end
-
---// keybind (click to bind, right click to cycle mode: toggle / hold / always)
-function library:keybind(properties)
-	local cfg = {
-		name = properties.name or properties.Name,
-		flag = properties.flag or properties.Flag or tostring(math.random(1000000, 9999999)),
-		mode = properties.mode or properties.Mode or "toggle",
-		default = properties.default or properties.Default,
-		callback = properties.callback or properties.Callback or function() end,
-		changed = properties.changed or properties.Changed or function() end,
-		tooltip = properties.tooltip or properties.Tooltip,
-		section = properties.section or self,
-		chained = properties.chained or false,
-		key = nil,
-		active = false,
-		listening = false,
-	}
-
-	local section = cfg.section
-	local parent_holder = properties.parent_holder or section.holder
-
-	local outer
-
-	if cfg.chained then
-		outer = parent_holder
-	else
-		outer = library:create("Frame", {
-			Parent = parent_holder,
-			Size = dim2(1, 0, 0, 16),
-			BackgroundTransparency = 1,
-		})
-
-		if cfg.name then
-			local label = library:create("TextLabel", {
-				Parent = outer,
-				Font = library.font,
-				Text = cfg.name,
-				TextSize = library.text_size,
-				TextColor3 = library.theme.muted_text,
-				TextXAlignment = Enum.TextXAlignment.Left,
-				Position = dim2(0, 18, 0, 0),
-				Size = dim2(1, -18, 1, 0),
-				BackgroundTransparency = 1,
-			})
-
-			register_theme(label, "muted_text", "TextColor3")
-		end
-	end
-
-	local display = library:create("TextButton", {
-		Parent = outer,
-		Font = library.font,
-		Text = "[ ]",
-		TextSize = library.text_size,
-		TextColor3 = library.theme.muted_text,
-		AnchorPoint = cfg.chained and vec2(0, 0.5) or vec2(1, 0.5),
-		Position = cfg.chained and dim2(0, 0, 0.5, 0) or dim2(1, 0, 0.5, 0),
-		Size = dim2(0, 30, 0, 12),
-		BackgroundTransparency = 1,
-		TextXAlignment = cfg.chained and Enum.TextXAlignment.Left or Enum.TextXAlignment.Right,
-	})
-
-	register_theme(display, "muted_text", "TextColor3")
-
-	cfg.display = display
-
-	local modes = { "toggle", "hold", "always" }
-
-	function cfg.set(key, silent)
-		cfg.key = key
-
-		display.Text = key and (keys[key] or (key.Name and key.Name or tostring(key))) or "[ ]"
-		library.flags[cfg.flag] = { key = key, mode = cfg.mode, active = cfg.active }
-
-		if not silent then
-			cfg.changed(key)
-		end
-	end
-
-	function cfg.set_active(state)
-		cfg.active = state
-
-		if library.flags[cfg.flag] then
-			library.flags[cfg.flag].active = state
-		end
-
-		display.TextColor3 = state and library.theme.accent or library.theme.muted_text
-		cfg.callback(state)
-	end
-
-	function cfg.set_mode(mode)
-		cfg.mode = mode
-
-		if library.flags[cfg.flag] then
-			library.flags[cfg.flag].mode = mode
-		end
-
-		cfg.set_active(false)
-	end
-
-	display.MouseButton1Click:Connect(function()
-		if library.keybind_listening and library.keybind_listening ~= cfg then
-			return
-		end
-
-		cfg.listening = true
-		library.keybind_listening = cfg
-		display.Text = "[...]"
-		library:remove_tooltip()
-	end)
-
-	display.MouseButton2Click:Connect(function()
-		local index = find(modes, cfg.mode) or 1
-		cfg.set_mode(modes[(index % #modes) + 1])
-		library:notification({ text = "keybind mode: " .. cfg.mode, time = 2 })
-	end)
-
-	if properties.tooltip or properties.Tooltip then
-		library:hover_tooltip(display, properties.tooltip or properties.Tooltip)
-	end
-
-	library:connection(uis.InputBegan, function(input, game_processed)
-		if library.keybind_listening == cfg then
-			if input.UserInputType == Enum.UserInputType.Keyboard then
-				if input.KeyCode == Enum.KeyCode.Escape then
-					cfg.set(nil, true)
-				else
-					cfg.set(input.KeyCode)
-				end
-
-				cfg.listening = false
-				library.keybind_listening = nil
-				return
-			elseif find({ Enum.UserInputType.MouseButton1, Enum.UserInputType.MouseButton2, Enum.UserInputType.MouseButton3 }, input.UserInputType) then
-				cfg.set(input.UserInputType)
-				cfg.listening = false
-				library.keybind_listening = nil
-				return
-			end
-
-			return
-		end
-
-		if game_processed or not cfg.key then
-			return
-		end
-
-		if input.KeyCode == cfg.key or input.UserInputType == cfg.key then
-			if cfg.mode == "toggle" then
-				cfg.set_active(not cfg.active)
-			elseif cfg.mode == "hold" then
-				cfg.set_active(true)
-			elseif cfg.mode == "always" then
-				if not cfg.active then
-					cfg.set_active(true)
-				end
-			end
-		end
-	end)
-
-	library:connection(uis.InputEnded, function(input)
-		if not cfg.key then
-			return
-		end
-
-		if cfg.mode == "hold" and (input.KeyCode == cfg.key or input.UserInputType == cfg.key) then
-			cfg.set_active(false)
-		end
-	end)
-
-	if cfg.default then
-		cfg.set(cfg.default, true)
-	end
-
-	library.config_flags[cfg.flag] = function(value)
-		if type(value) == "table" then
-			cfg.set_mode(value.mode or cfg.mode)
-			cfg.set(value.key, true)
-		else
-			cfg.set(value, true)
-		end
-	end
-
-	-- chain a colorpicker after this keybind (e.g. toggle:keybind():colorpicker())
-	function cfg.colorpicker(properties_override)
-		local chained_properties = properties_override or {}
-
-		chained_properties.inline = cfg.chained
-		chained_properties.section = section
-		chained_properties.parent_holder = parent_holder
-
-		return library:colorpicker(chained_properties)
-	end
-
-	return setmetatable(cfg, library)
-end
-
---// config system
-local function ensure_directories()
-	pcall(function()
-		if makefolder then
-			makefolder(library.directory)
-
-			for _, folder in next, library.folders do
-				makefolder(library.directory .. folder)
-			end
-		end
-	end)
-end
-
-ensure_directories()
-
-function library:get_config()
-	local config = {}
-
-	for flag, value in next, library.flags do
-		if type(value) == "table" and value.key then
-			config[flag] = { key = tostring(value.key), mode = value.mode, active = value.active }
-		elseif type(value) == "table" and value.Color then
-			config[flag] = { Color = value.Color:ToHex(), Transparency = value.Transparency }
-		elseif type(value) == "table" and value[1] == nil then
-			-- empty multi dropdown
-			config[flag] = {}
-		else
-			config[flag] = value
-		end
-	end
-
-	return http_service:JSONEncode(config)
-end
-
-function library:load_config(config_json)
-	local ok, config = pcall(function()
-		return http_service:JSONDecode(config_json)
-	end)
-
-	if not ok or type(config) ~= "table" then
-		library:notification({ text = "failed to read config", time = 3 })
-		return
-	end
-
-	for flag, value in next, config do
-		local setter = library.config_flags[flag]
-
-		if setter then
-			if type(value) == "table" and value.Color then
-				local success, color = pcall(function()
-					return hex(value.Color)
-				end)
-
-				if success and color then
-					setter(color, value.Transparency or 0)
-				end
-			elseif type(value) == "table" and value.key then
-				local success, enum = pcall(function()
-					return library:convert_enum(value.key)
-				end)
-
-				if success and enum then
-					setter({ key = enum, mode = value.mode or "toggle", active = false })
-				end
-			else
-				setter(value)
-			end
-		end
-	end
-
-	library:notification({ text = "config loaded", time = 3 })
-end
-
-function library:convert_enum(enum_string)
-	local parts = string.split(enum_string, ".")
-
-	if parts[1] == "Enum" and parts[2] == "UserInputType" then
-		return Enum.UserInputType[parts[3]]
-	elseif parts[1] == "Enum" and parts[2] == "KeyCode" then
-		return Enum.KeyCode[parts[3]]
-	end
-
-	return nil
-end
-
-function library:save_config(name)
-	local path = library.directory .. "/configs/" .. tostring(name) .. ".json"
-
-	pcall(function()
-		writefile(path, library:get_config())
-	end)
-
-	library:notification({ text = "saved config: " .. tostring(name), time = 3 })
-end
-
-function library:load_config_file(name)
-	local path = library.directory .. "/configs/" .. tostring(name) .. ".json"
-
-	pcall(function()
-		library:load_config(readfile(path))
-	end)
-end
-
-function library:get_configs()
-	local configs = {}
-
-	pcall(function()
-		for _, file in next, listfiles(library.directory .. "/configs") do
-			local name = string.gsub(file, library.directory .. "/configs/", "")
-			name = string.gsub(name, "%.json$", "")
-			insert(configs, name)
-		end
-	end)
-
-	return configs
-end
-
-return library
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+print(string.format("[typeshit.cc private] ESP core %s loaded | native Drawing: %s | players tracked: %d",
+    EspLib._VERSION, tostring(USING_NATIVE), #Players:GetPlayers()))
